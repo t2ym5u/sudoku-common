@@ -8,7 +8,9 @@ local InputContainer = require("ui/widget/container/inputcontainer")
 local TextViewer     = require("ui/widget/textviewer")
 local TextWidget     = require("ui/widget/textwidget")
 local UIManager      = require("ui/uimanager")
-local _              = require("gettext")
+local VerticalGroup  = require("ui/widget/verticalgroup")
+local VerticalSpan   = require("ui/widget/verticalspan")
+local _              = require("i18n")
 local T              = require("ffi/util").template
 
 local DeviceScreen = Device.screen
@@ -200,9 +202,22 @@ function BaseScreen:checkProgress()
     end
 end
 
-function BaseScreen:onClose()
+function BaseScreen:closeScreen()
     self.plugin:saveState()
     self.plugin:onScreenClosed()
+    UIManager:close(self)
+    UIManager:setDirty(nil, "full")
+end
+
+function BaseScreen:onClose()
+    self:closeScreen()
+end
+
+function BaseScreen:makeCloseButtonConfig()
+    return {
+        text     = _("Close"),
+        callback = function() self:closeScreen() end,
+    }
 end
 
 function BaseScreen:onUndo()
@@ -216,6 +231,28 @@ function BaseScreen:onUndo()
     self.plugin:saveState()
     self:updateUndoButton()
     self:updateDigitButtons()
+end
+
+-- ---------------------------------------------------------------------------
+-- Fixed portrait layout helper
+-- ---------------------------------------------------------------------------
+
+function BaseScreen:buildPortraitLayout(header, content, footer)
+    local sh       = self.dimen.h
+    local header_h = header  and header:getSize().h  or 0
+    local content_h= content and content:getSize().h or 0
+    local footer_h = footer  and footer:getSize().h  or 0
+    local remaining = math.max(0, sh - header_h - content_h - footer_h)
+    local top_gap   = math.floor(remaining / 2)
+    local bot_gap   = remaining - top_gap
+    local items = { align = "center" }
+    if header  then items[#items+1] = header  end
+    items[#items+1] = VerticalSpan:new{ width = top_gap }
+    if content then items[#items+1] = content end
+    items[#items+1] = VerticalSpan:new{ width = bot_gap }
+    if footer  then items[#items+1] = footer  end
+    self.layout = VerticalGroup:new(items)
+    self[1] = self.layout
 end
 
 -- ---------------------------------------------------------------------------
