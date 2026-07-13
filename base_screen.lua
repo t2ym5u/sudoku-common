@@ -19,11 +19,12 @@ local DeviceScreen = Device.screen
 -- Shared difficulty constants
 -- ---------------------------------------------------------------------------
 
-local DIFFICULTY_ORDER = { "easy", "medium", "hard" }
+local DIFFICULTY_ORDER = { "easy", "medium", "hard", "expert" }
 local DIFFICULTY_LABELS = {
     easy   = _("Easy"),
     medium = _("Medium"),
     hard   = _("Hard"),
+    expert = _("Expert"),
 }
 
 -- ---------------------------------------------------------------------------
