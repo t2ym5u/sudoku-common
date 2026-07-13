@@ -12,7 +12,24 @@ local function shuffledDigits(n)
     return digits
 end
 
-local function isValidPlacement(grid, row, col, value, n, box_rows, box_cols)
+-- Build a per-cell lookup of extra regions (e.g. hyper boxes, diagonals) so
+-- isValidPlacement can enforce "no duplicate digit" constraints beyond the
+-- standard row/col/box rules. extra_regions is a list of cell-lists, e.g.
+-- { { {r=1,c=1}, {r=2,c=2}, ... }, ... }. Returns nil when extra_regions is nil.
+local function buildCellRegionMap(extra_regions)
+    if not extra_regions then return nil end
+    local map = {}
+    for _, region in ipairs(extra_regions) do
+        for _, cell in ipairs(region) do
+            map[cell.r] = map[cell.r] or {}
+            map[cell.r][cell.c] = map[cell.r][cell.c] or {}
+            table.insert(map[cell.r][cell.c], region)
+        end
+    end
+    return map
+end
+
+local function isValidPlacement(grid, row, col, value, n, box_rows, box_cols, cell_region_map)
     for i = 1, n do
         if grid[row][i] == value or grid[i][col] == value then
             return false
@@ -27,10 +44,22 @@ local function isValidPlacement(grid, row, col, value, n, box_rows, box_cols)
             end
         end
     end
+    if cell_region_map then
+        local regions = cell_region_map[row] and cell_region_map[row][col]
+        if regions then
+            for _, region in ipairs(regions) do
+                for _, cell in ipairs(region) do
+                    if (cell.r ~= row or cell.c ~= col) and grid[cell.r][cell.c] == value then
+                        return false
+                    end
+                end
+            end
+        end
+    end
     return true
 end
 
-local function fillBoard(grid, cell, n, box_rows, box_cols)
+local function fillBoard(grid, cell, n, box_rows, box_cols, cell_region_map)
     if cell > n * n then
         return true
     end
@@ -38,9 +67,9 @@ local function fillBoard(grid, cell, n, box_rows, box_cols)
     local col = (cell - 1) % n + 1
     local numbers = shuffledDigits(n)
     for _, value in ipairs(numbers) do
-        if isValidPlacement(grid, row, col, value, n, box_rows, box_cols) then
+        if isValidPlacement(grid, row, col, value, n, box_rows, box_cols, cell_region_map) then
             grid[row][col] = value
-            if fillBoard(grid, cell + 1, n, box_rows, box_cols) then
+            if fillBoard(grid, cell + 1, n, box_rows, box_cols, cell_region_map) then
                 return true
             end
             grid[row][col] = 0
@@ -49,13 +78,17 @@ local function fillBoard(grid, cell, n, box_rows, box_cols)
     return false
 end
 
-local function generateSolvedBoard(n, box_rows, box_cols)
+-- extra_regions (optional): list of cell-lists that must also contain no
+-- duplicate digits (e.g. hyper-sudoku boxes, X-sudoku diagonals).
+local function generateSolvedBoard(n, box_rows, box_cols, extra_regions)
     local grid = emptyGrid(n)
-    fillBoard(grid, 1, n, box_rows, box_cols)
+    local cell_region_map = buildCellRegionMap(extra_regions)
+    fillBoard(grid, 1, n, box_rows, box_cols, cell_region_map)
     return grid
 end
 
-local function countSolutions(grid, limit, n, box_rows, box_cols)
+local function countSolutions(grid, limit, n, box_rows, box_cols, extra_regions)
+    local cell_region_map = buildCellRegionMap(extra_regions)
     local solutions = 0
     local function search(cell)
         if solutions >= limit then return end
@@ -70,7 +103,7 @@ local function countSolutions(grid, limit, n, box_rows, box_cols)
             return
         end
         for _, value in ipairs(shuffledDigits(n)) do
-            if isValidPlacement(grid, row, col, value, n, box_rows, box_cols) then
+            if isValidPlacement(grid, row, col, value, n, box_rows, box_cols, cell_region_map) then
                 grid[row][col] = value
                 search(cell + 1)
                 grid[row][col] = 0
@@ -82,10 +115,10 @@ local function countSolutions(grid, limit, n, box_rows, box_cols)
     return solutions
 end
 
-local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols)
+local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extra_regions)
     local puzzle = copyGrid(solved_grid, n)
     local total = n * n
-    local ratios = { easy = 0.43, medium = 0.56, hard = 0.65 }
+    local ratios = { easy = 0.43, medium = 0.56, hard = 0.65, expert = 0.72 }
     local ratio = ratios[difficulty] or ratios.medium
     local removals = math.floor(total * ratio)
     local cells = {}
@@ -106,7 +139,7 @@ local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols)
             local backup = puzzle[row][col]
             puzzle[row][col] = 0
             local working = copyGrid(puzzle, n)
-            if countSolutions(working, 2, n, box_rows, box_cols) == 1 then
+            if countSolutions(working, 2, n, box_rows, box_cols, extra_regions) == 1 then
                 removed = removed + 1
             else
                 puzzle[row][col] = backup
