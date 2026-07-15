@@ -11,7 +11,7 @@ Shared library for all Sudoku-variant plugins in this repository
 | `base_board.lua` | Base game-state class — conflict detection, notes, undo, serialization |
 | `base_board_widget.lua` | Base board renderer — cell sizing, given/user value styling, selection |
 | `base_screen.lua` | Base full-screen UI — number pad, toolbar, pencil-mark toggle |
-| `grid_utils.lua` | Grid helpers — `emptyGrid`, `copyGrid`, `cloneNoteCell` |
+| `sudoku_grid_utils.lua` | Grid helpers — `emptyGrid`, `copyGrid`, `cloneNoteCell` |
 | `puzzle_generator.lua` | Backtracking puzzle generator parameterised by box shape |
 
 ## How to use in a plugin
