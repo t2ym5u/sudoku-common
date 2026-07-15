@@ -1,4 +1,4 @@
-local grid_utils = require("grid_utils")
+local grid_utils = require("sudoku_grid_utils")
 local emptyGrid  = grid_utils.emptyGrid
 local copyGrid   = grid_utils.copyGrid
 
