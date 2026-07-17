@@ -12,8 +12,21 @@ local TitleBar       = require("ui/widget/titlebar")
 local UIManager      = require("ui/uimanager")
 local VerticalGroup  = require("ui/widget/verticalgroup")
 local VerticalSpan   = require("ui/widget/verticalspan")
-local _              = require("i18n")
 local T              = require("ffi/util").template
+
+-- sudoku-common is vendored independently into each consuming plugin's own
+-- common/ dir (see the sudoku_common family in manifest.json) and has no
+-- reliable package.path back to game-common's i18n.lua -- unlike that
+-- module, this shim carries no custom translation table, just the same
+-- callable-plus-lang() shape so showRules()'s EN/FR selection below works
+-- without depending on another repo being loaded first.
+local koreader_t = require("gettext")
+local function lang()
+    return (G_reader_settings and G_reader_settings:readSetting("language") or "en"):sub(1, 2)
+end
+local _ = setmetatable({ lang = lang }, {
+    __call = function(_, s) return koreader_t(s) end,
+})
 
 local DeviceScreen = Device.screen
 
