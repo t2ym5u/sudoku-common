@@ -115,7 +115,10 @@ local function countSolutions(grid, limit, n, box_rows, box_cols, extra_regions)
     return solutions
 end
 
-local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extra_regions)
+-- on_progress (optional): called after each cell examined as
+-- on_progress(removed, removals), so callers can drive a real progress bar
+-- off actual digging work instead of a fake timer.
+local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extra_regions, on_progress)
     local puzzle = copyGrid(solved_grid, n)
     local total = n * n
     local ratios = { easy = 0.43, medium = 0.56, hard = 0.65, expert = 0.72 }
@@ -145,6 +148,7 @@ local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extr
                 puzzle[row][col] = backup
             end
         end
+        if on_progress then on_progress(removed, removals) end
     end
     return puzzle
 end
