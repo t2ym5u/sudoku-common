@@ -1,18 +1,20 @@
-local ButtonDialog   = require("ui/widget/buttondialog")
-local ButtonTable    = require("ui/widget/buttontable")
-local Blitbuffer     = require("ffi/blitbuffer")
-local Device         = require("device")
-local Font           = require("ui/font")
-local Geom           = require("ui/geometry")
-local InfoMessage    = require("ui/widget/infomessage")
-local InputContainer = require("ui/widget/container/inputcontainer")
-local TextViewer     = require("ui/widget/textviewer")
-local TextWidget     = require("ui/widget/textwidget")
-local TitleBar       = require("ui/widget/titlebar")
-local UIManager      = require("ui/uimanager")
-local VerticalGroup  = require("ui/widget/verticalgroup")
-local VerticalSpan   = require("ui/widget/verticalspan")
-local T              = require("ffi/util").template
+local ButtonDialog       = require("ui/widget/buttondialog")
+local ButtonTable        = require("ui/widget/buttontable")
+local Blitbuffer         = require("ffi/blitbuffer")
+local Device             = require("device")
+local Font               = require("ui/font")
+local Geom               = require("ui/geometry")
+local InfoMessage        = require("ui/widget/infomessage")
+local InputContainer     = require("ui/widget/container/inputcontainer")
+local ProgressbarDialog  = require("ui/widget/progressbardialog")
+local TextViewer         = require("ui/widget/textviewer")
+local TextWidget         = require("ui/widget/textwidget")
+local TitleBar           = require("ui/widget/titlebar")
+local UIManager          = require("ui/uimanager")
+local VerticalGroup      = require("ui/widget/verticalgroup")
+local VerticalSpan       = require("ui/widget/verticalspan")
+local time               = require("ui/time")
+local T                  = require("ffi/util").template
 
 -- sudoku-common is vendored independently into each consuming plugin's own
 -- common/ dir (see the sudoku_common family in manifest.json) and has no
@@ -41,6 +43,39 @@ local DIFFICULTY_LABELS = {
     hard   = _("Hard"),
     expert = _("Expert"),
 }
+
+-- ---------------------------------------------------------------------------
+-- Puzzle generation with a real progress bar
+--
+-- board:generate() blocks the UI thread (uniqueness-check backtracking over
+-- every dug cell). Rather than a fake timer, we drive a ProgressbarDialog
+-- off the actual removed/removals counts board:generate() reports. The
+-- dialog only appears once generation has already run past
+-- PROGRESS_SHOW_DELAY_MS, so quick generations (small grids, easy
+-- difficulty) never get an unnecessary e-ink flash.
+-- ---------------------------------------------------------------------------
+
+local PROGRESS_SHOW_DELAY_MS = 200
+
+local function generateWithProgress(board, difficulty)
+    local start = time.now()
+    local dialog
+    board:generate(difficulty, function(removed, removals)
+        if removals <= 0 then return end
+        if not dialog then
+            if time.to_ms(time.since(start)) < PROGRESS_SHOW_DELAY_MS then return end
+            dialog = ProgressbarDialog:new{
+                title                = _("Generating puzzle…"),
+                progress_max         = 1,
+                refresh_time_seconds = 0.15,
+                dismissable          = false,
+            }
+            dialog:show()
+        end
+        dialog:reportProgress(removed / removals)
+    end)
+    if dialog then dialog:close() end
+end
 
 -- ---------------------------------------------------------------------------
 -- BaseScreen — shared full-screen game UI
@@ -182,7 +217,7 @@ function BaseScreen:onErase()
 end
 
 function BaseScreen:onNewGame()
-    self.board:generate(self.board.difficulty)
+    generateWithProgress(self.board, self.board.difficulty)
     self.plugin:saveState()
     self.board_widget:refresh()
     self:ensureShowButtonState()
@@ -338,7 +373,8 @@ function BaseScreen:makeRulesButtonConfig(en_text, fr_text)
 end
 
 return {
-    BaseScreen       = BaseScreen,
-    DIFFICULTY_ORDER  = DIFFICULTY_ORDER,
-    DIFFICULTY_LABELS = DIFFICULTY_LABELS,
+    BaseScreen           = BaseScreen,
+    DIFFICULTY_ORDER     = DIFFICULTY_ORDER,
+    DIFFICULTY_LABELS    = DIFFICULTY_LABELS,
+    generateWithProgress = generateWithProgress,
 }
