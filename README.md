@@ -1,7 +1,7 @@
 # sudoku-common
 
 Shared library for all Sudoku-variant plugins in this repository
-(`sudoku`, `sudokukiller`, `sudokux`, `hypersudoku`, `sandwichsudoku`,
+(`sudoku`, `sudokukiller`, `sudokux`, `sandwichsudoku`,
 `thermosudoku`, `windoku`).
 
 ## Modules
