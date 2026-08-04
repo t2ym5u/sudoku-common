@@ -28,6 +28,30 @@ local function drawDiagonalLine(bb, x, y, length, dx, dy, color, thickness)
     end
 end
 
+local function drawDashedLine(bb, x, y, w, h, color, dash, gap)
+    dash = math.max(1, dash or 5)
+    gap  = math.max(1, gap  or 3)
+    if w >= h then
+        local pos = x
+        local on  = true
+        while pos < x + w do
+            local seg = math.min(on and dash or gap, x + w - pos)
+            if on then bb:paintRect(math.floor(pos), y, math.max(1, math.floor(seg)), h, color) end
+            pos = pos + seg
+            on  = not on
+        end
+    else
+        local pos = y
+        local on  = true
+        while pos < y + h do
+            local seg = math.min(on and dash or gap, y + h - pos)
+            if on then bb:paintRect(x, math.floor(pos), w, math.max(1, math.floor(seg)), color) end
+            pos = pos + seg
+            on  = not on
+        end
+    end
+end
+
 -- ---------------------------------------------------------------------------
 -- BaseBoardWidget — shared init / tap / refresh logic
 --
@@ -49,6 +73,9 @@ function BaseBoardWidget:init()
     self.box_cols = box_cols
 
     self.size = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.82)
+    if self.max_size then
+        self.size = math.min(self.size, math.max(self.max_size, 80))
+    end
     self.dimen = Geom:new{ w = self.size, h = self.size }
     self.paint_rect = Geom:new{ x = 0, y = 0, w = self.size, h = self.size }
     self.number_face = Font:getFace("cfont", math.max(28, math.floor(self.size / 14)))
@@ -160,4 +187,5 @@ return {
     BaseBoardWidget  = BaseBoardWidget,
     drawLine         = drawLine,
     drawDiagonalLine = drawDiagonalLine,
+    drawDashedLine   = drawDashedLine,
 }
