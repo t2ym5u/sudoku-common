@@ -57,13 +57,15 @@ local DIFFICULTY_LABELS = {
 
 local PROGRESS_SHOW_DELAY_MS = 200
 
--- randInt(i) -> [1,i] (optional): threaded through to board:generate() so
--- callers can request a deterministic "puzzle of the day" (see
--- game-common/daily_seed.lua). nil means board:generate() falls back to
--- math.random -- normal play is unaffected.
-local function generateWithProgress(board, difficulty, randInt)
+-- rng (optional): a DailySeed.rng()-style function() -> [0,1) closure, used
+-- for reproducible "puzzle of the day" generation (see game-common/daily_seed.lua).
+-- Converted here, once, to the randInt(i) -> [1,i] shape puzzle_generator.lua
+-- and board:generate() expect. nil means board:generate() falls back to
+-- math.random -- normal "New game" play is unaffected.
+local function generateWithProgress(board, difficulty, rng)
     local start = time.now()
     local dialog
+    local randInt = rng and function(i) return math.floor(rng() * i) + 1 end or nil
     board:generate(difficulty, randInt, function(removed, removals)
         if removals <= 0 then return end
         if not dialog then
