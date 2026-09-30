@@ -300,6 +300,12 @@ function BaseBoard:getExtraRegions()
     return nil
 end
 
+-- Killer variants override this with their cage list, so hints reason with the
+-- sums as well as the grid. Everything else has none.
+function BaseBoard:getCages()
+    return nil
+end
+
 -- Row, col of the first player-entered value that contradicts the solution,
 -- or nil. Hints must refuse to run while one exists: the solver would happily
 -- deduce from the wrong premise and hand out a confidently wrong answer.
