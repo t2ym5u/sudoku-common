@@ -274,6 +274,70 @@ function BaseBoard:undo()
     return true
 end
 
+-- ---------------------------------------------------------------------------
+-- Hint support (see logic_solver.lua and BaseScreen:onHint)
+-- ---------------------------------------------------------------------------
+
+-- The grid as it currently stands: givens plus whatever the player has
+-- entered. This is what the solver reasons over, so a hint takes the player's
+-- own work into account instead of restarting from the original clues.
+function BaseBoard:getWorkingGrid()
+    local n    = self.n
+    local grid = {}
+    for r = 1, n do
+        grid[r] = {}
+        for c = 1, n do
+            grid[r][c] = self:getWorkingValue(r, c)
+        end
+    end
+    return grid
+end
+
+-- Variants whose puzzle has units beyond rows/columns/boxes (sudokux's
+-- diagonals, windoku's window boxes) override this so hints reason with the
+-- same constraints the generator used. Everything else has none.
+function BaseBoard:getExtraRegions()
+    return nil
+end
+
+-- Row, col of the first player-entered value that contradicts the solution,
+-- or nil. Hints must refuse to run while one exists: the solver would happily
+-- deduce from the wrong premise and hand out a confidently wrong answer.
+function BaseBoard:findWrongEntry()
+    for r = 1, self.n do
+        for c = 1, self.n do
+            local value = self.user[r][c]
+            if value ~= 0 and value ~= self.solution[r][c] then
+                return r, c
+            end
+        end
+    end
+    return nil
+end
+
+-- Write a hinted value, moving the selection there so the player sees where
+-- it landed. Goes through setValue, so it is undoable like any other move.
+function BaseBoard:applyHint(row, col, digit)
+    if self.reveal_solution then
+        return false, _("Hide result to keep playing.")
+    end
+    self:setSelection(row, col)
+    local ok, err = self:setValue(digit)
+    if ok then
+        self.hints_used = (self.hints_used or 0) + 1
+    end
+    return ok, err
+end
+
+-- Not persisted, matching undo_stack: a reload starts the count fresh.
+function BaseBoard:getHintsUsed()
+    return self.hints_used or 0
+end
+
+function BaseBoard:resetHintsUsed()
+    self.hints_used = 0
+end
+
 function BaseBoard:isSolved()
     if self.reveal_solution then return false end
     for r = 1, self.n do
