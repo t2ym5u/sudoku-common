@@ -28,6 +28,26 @@ local function drawDiagonalLine(bb, x, y, length, dx, dy, color, thickness)
     end
 end
 
+-- Conflict marker.
+--
+-- KOReader's palette is greyscale only -- there is no Blitbuffer.COLOR_RED --
+-- and every shade dark enough to read as "wrong" is already spoken for
+-- (black = given, GRAY_2 = user entry, GRAY_4 = revealed solution). So the
+-- conflict is signalled by shape instead: a bar under the digit, which also
+-- survives the band/cell highlight painted behind it.
+local function drawConflictMark(bb, cell_x, cell_y, cell, color)
+    -- Digits sit on a baseline around 0.72 * cell, so a bar in the bottom
+    -- margin clears their ink at every grid size (9x9 through 16x16) while
+    -- still leaving a gap to the cell border below it.
+    local inset     = math.max(1, math.floor(cell / 6))
+    local margin    = math.max(2, math.floor(cell / 14))
+    local thickness = math.max(2, math.floor(cell / 16))
+    local width     = math.max(1, math.floor(cell - 2 * inset))
+    local top       = math.floor(cell_y + cell - margin - thickness)
+    bb:paintRect(math.floor(cell_x + inset), top, width, thickness,
+                 color or Blitbuffer.COLOR_BLACK)
+end
+
 local function drawDashedLine(bb, x, y, w, h, color, dash, gap)
     dash = math.max(1, dash or 5)
     gap  = math.max(1, gap  or 3)
@@ -187,5 +207,6 @@ return {
     BaseBoardWidget  = BaseBoardWidget,
     drawLine         = drawLine,
     drawDiagonalLine = drawDiagonalLine,
+    drawConflictMark = drawConflictMark,
     drawDashedLine   = drawDashedLine,
 }
