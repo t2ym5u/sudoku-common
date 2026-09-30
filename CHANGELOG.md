@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-09-30
+
+### Added
+- `drawConflictMark()` in `base_board_widget.lua`, exported alongside
+  `drawLine`/`drawDiagonalLine`: draws the bar that marks a cell whose digit
+  conflicts with another. Greyscale-only by design -- every shade dark enough
+  to read as "wrong" is already taken by givens, entries and revealed
+  solutions, so the marker carries the meaning in its shape.
+
 ## [1.1.0] - 2026-09-30
 
 ### Added
