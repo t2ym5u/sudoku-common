@@ -366,7 +366,7 @@ function BaseScreen:onHint()
 
     local step, prereq, reason = logic_solver.nextPlacement(
         board:getWorkingGrid(), board.n, board.box_rows, board.box_cols,
-        board:getExtraRegions())
+        board:getExtraRegions(), { cages = board:getCages() })
 
     if not step then
         self.hint_cell = nil

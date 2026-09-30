@@ -662,12 +662,224 @@ local function xyWing(ctx, st)
     return nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Killer cages (optional)
+--
+-- A cage is { sum = n, cells = { {r=,c=}, ... } }: its cells hold distinct
+-- digits adding to the sum. Passed in through opts.cages, and ignored
+-- entirely when absent, so classic variants pay nothing for this.
+--
+-- The workhorse below is combination analysis: enumerate every way the cage's
+-- unplaced cells could be filled, and keep only the digits that appear in at
+-- least one. It subsumes the usual published shortcuts (a 3-cell 6 must be
+-- 1-2-3, and so on) without hard-coding any of them.
+-- ---------------------------------------------------------------------------
+
+-- Walks the cage's unplaced cells, trying each cell's remaining candidates,
+-- and records which digits survive in at least one complete solution. Returns
+-- a per-cell mask of viable digits, or nil when the cage cannot be completed
+-- at all (which makes the whole position contradictory).
+local function cageViableDigits(ctx, st, cells, target)
+    local k = #cells
+    if k == 0 then return nil end
+
+    local viable = {}
+    for i = 1, k do viable[i] = 0 end
+
+    local chosen = {}
+    local used   = 0              -- digits already taken inside this cage
+    local found  = false
+
+    local function rec(i, remaining)
+        if i > k then
+            if remaining ~= 0 then return end
+            found = true
+            for j = 1, k do viable[j] = bor(viable[j], chosen[j]) end
+            return
+        end
+        -- Every later cell needs at least 1, and at most n.
+        local left = k - i
+        local free = band(st.cand[cells[i]], bnot(used))
+        while free ~= 0 do
+            local m = band(free, -free)
+            local d = lowestDigit(m)
+            if d <= remaining - left and (remaining - d) <= left * ctx.n then
+                chosen[i] = m
+                used = bor(used, m)
+                rec(i + 1, remaining - d)
+                used = band(used, bnot(m))
+            end
+            free = band(free, free - 1)
+        end
+    end
+
+    rec(1, target)
+    if not found then return nil end
+    return viable
+end
+
+local function cageCombinations(ctx, st)
+    local cages = st.cages
+    if not cages then return nil end
+
+    for _, cage in ipairs(cages) do
+        local open, target = {}, cage.sum
+        for _, cell in ipairs(cage.cells) do
+            local idx = (cell.r - 1) * ctx.n + cell.c
+            local v = st.value[idx]
+            if v ~= 0 then target = target - v else open[#open + 1] = idx end
+        end
+
+        if #open > 0 then
+            local viable = cageViableDigits(ctx, st, open, target)
+            if not viable then
+                st.broken = true
+                return nil
+            end
+            local elims, focus = {}, {}
+            for i, idx in ipairs(open) do
+                local dead = band(st.cand[idx], bnot(viable[i]))
+                local r, c = rc(ctx, idx)
+                focus[#focus + 1] = { r = r, c = c }
+                for _, d in ipairs(digitsOf(dead)) do
+                    elims[#elims + 1] = { r = r, c = c, digit = d }
+                end
+            end
+            if #elims > 0 then
+                return {
+                    technique    = "cage_combinations",
+                    tier         = M.TIER.LOCKED,
+                    unit_kind    = "cage",
+                    sum          = cage.sum,
+                    eliminations = elims,
+                    focus        = focus,
+                }
+            end
+        end
+    end
+    return nil
+end
+
+-- One cell left in a cage: its value is simply what the sum still needs.
+local function cageLastCell(ctx, st)
+    local cages = st.cages
+    if not cages then return nil end
+
+    for _, cage in ipairs(cages) do
+        local open, target = nil, cage.sum
+        local count = 0
+        for _, cell in ipairs(cage.cells) do
+            local idx = (cell.r - 1) * ctx.n + cell.c
+            local v = st.value[idx]
+            if v ~= 0 then target = target - v else count = count + 1; open = idx end
+        end
+        if count == 1 and target >= 1 and target <= ctx.n then
+            local m = lshift(1, target - 1)
+            if band(st.cand[open], m) ~= 0 and popcount(st.cand[open]) > 1 then
+                local r, c = rc(ctx, open)
+                return {
+                    technique  = "cage_last_cell",
+                    tier       = M.TIER.SINGLES,
+                    digit      = target,
+                    unit_kind  = "cage",
+                    sum        = cage.sum,
+                    placements = { { r = r, c = c, digit = target } },
+                    focus      = cellList(ctx, { open }),
+                }
+            end
+        end
+    end
+    return nil
+end
+
+-- The "45 rule", the technique killer grids are actually built around: every
+-- unit holds each digit once, so its cells always sum to 1+2+...+n. Compare
+-- that against the cages sitting inside the unit and a single cell often falls
+-- out, even on a grid with no given digits at all.
+--
+--   innie -- the cages inside the unit leave exactly one cell uncovered: that
+--            cell is the unit total minus those cage sums.
+--   outie -- the cages covering the unit overflow it by exactly one cell: that
+--            outside cell is the cage sums minus the unit total.
+local function cageUnitSums(ctx, st)
+    local cages = st.cages
+    if not cages then return nil end
+
+    local n      = ctx.n
+    local total  = n * (n + 1) / 2
+    local in_unit_cache = ctx.in_unit
+
+    for u = 1, #ctx.units do
+        local member = in_unit_cache[u]
+        local unit_cells = ctx.units[u]
+
+        local covered, sum_inside = {}, 0
+        local partial, partial_out = nil, nil
+        local too_many = false
+
+        for _, cage in ipairs(cages) do
+            local inside, outside = {}, {}
+            for _, cell in ipairs(cage.cells) do
+                local idx = (cell.r - 1) * n + cell.c
+                if member[idx] then inside[#inside + 1] = idx else outside[#outside + 1] = idx end
+            end
+            if #inside > 0 then
+                if #outside == 0 then
+                    sum_inside = sum_inside + cage.sum
+                    for _, idx in ipairs(inside) do covered[idx] = true end
+                elseif partial then
+                    too_many = true
+                    break
+                else
+                    partial, partial_out = cage, outside
+                    for _, idx in ipairs(inside) do covered[idx] = true end
+                end
+            end
+        end
+
+        if not too_many then
+            local uncovered = {}
+            for _, idx in ipairs(unit_cells) do
+                if not covered[idx] then uncovered[#uncovered + 1] = idx end
+            end
+
+            local target, cell
+            if not partial and #uncovered == 1 then
+                cell   = uncovered[1]
+                target = total - sum_inside
+            elseif partial and #uncovered == 0 and #partial_out == 1 then
+                cell   = partial_out[1]
+                target = (sum_inside + partial.sum) - total
+            end
+
+            if cell and target and target >= 1 and target <= n and st.value[cell] == 0 then
+                local m = lshift(1, target - 1)
+                if band(st.cand[cell], m) ~= 0 and popcount(st.cand[cell]) > 1 then
+                    local r, c = rc(ctx, cell)
+                    return {
+                        technique  = partial and "cage_outie" or "cage_innie",
+                        tier       = M.TIER.LOCKED,
+                        digit      = target,
+                        unit_kind  = ctx.unit_kind[u],
+                        placements = { { r = r, c = c, digit = target } },
+                        focus      = cellList(ctx, { cell }),
+                    }
+                end
+            end
+        end
+    end
+    return nil
+end
+
 -- Cheapest first, so the expensive subset/fish scans only run once the grid
 -- is genuinely stuck on singles -- which is also what makes the tier a fair
 -- description of the work a human has to do.
 local TECHNIQUES = {
     { name = "naked_single",      tier = M.TIER.SINGLES, fn = nakedSingle },
     { name = "hidden_single",     tier = M.TIER.SINGLES, fn = hiddenSingle },
+    { name = "cage_last_cell",    tier = M.TIER.SINGLES, fn = cageLastCell },
+    { name = "cage_unit_sums",    tier = M.TIER.LOCKED,  fn = cageUnitSums },
+    { name = "cage_combinations", tier = M.TIER.LOCKED,  fn = cageCombinations },
     { name = "locked_candidates", tier = M.TIER.LOCKED,  fn = lockedCandidates },
     { name = "naked_pair",        tier = M.TIER.LOCKED,
       fn = function(ctx, st) return nakedSubset(ctx, st, 2, "naked_pair", M.TIER.LOCKED) end },
@@ -738,6 +950,7 @@ function M.solve(grid, n, box_rows, box_cols, extra_regions, opts)
         return { solved = false, max_tier = 0, counts = {}, unsolved = -1,
                  contradiction = true, steps = opts.trace and {} or nil }
     end
+    st.cages = opts.cages
 
     local counts, steps, best = {}, opts.trace and {} or nil, 0
     while st.unsolved > 0 and not st.broken do
@@ -769,9 +982,11 @@ end
 -- max_tier. This is strictly stronger than "has a unique solution": a grid
 -- that passes this necessarily has exactly one solution, since every step
 -- taken is forced.
-function M.solvableWithin(grid, n, box_rows, box_cols, extra_regions, max_tier)
+-- cages (optional): killer-style { sum = n, cells = {...} } list, see the
+-- cage techniques above.
+function M.solvableWithin(grid, n, box_rows, box_cols, extra_regions, max_tier, cages)
     return M.solve(grid, n, box_rows, box_cols, extra_regions,
-                   { max_tier = max_tier }).solved
+                   { max_tier = max_tier, cages = cages }).solved
 end
 
 -- The single next deduction available on this grid, or nil if none is (either
@@ -782,6 +997,7 @@ function M.nextStep(grid, n, box_rows, box_cols, extra_regions, opts)
     local ctx = getContext(n, box_rows, box_cols, extra_regions)
     local st  = newState(ctx, grid)
     if not st then return nil end
+    st.cages = opts.cages
     return findStep(ctx, st, opts.max_tier or M.TIER.FISH)
 end
 
@@ -805,6 +1021,7 @@ function M.nextPlacement(grid, n, box_rows, box_cols, extra_regions, opts)
     local ctx = getContext(n, box_rows, box_cols, extra_regions)
     local st  = newState(ctx, grid)
     if not st then return nil, nil, "contradiction" end
+    st.cages = opts.cages
     if st.unsolved == 0 then return nil, nil, "complete" end
 
     local max_tier = opts.max_tier or M.TIER.FISH

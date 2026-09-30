@@ -370,3 +370,71 @@ describe("hint support", function()
         assert.are.equal("contradiction", select(3, LS.nextPlacement(broken, 9, 3, 3, nil)))
     end)
 end)
+
+describe("killer cages", function()
+    -- A cage is { sum = n, cells = {{r=,c=}, ...} }: distinct digits adding to
+    -- the sum. Passed through opts.cages; absent, nothing below runs at all.
+
+    it("ignores cages entirely when none are given", function()
+        local randInt = seededRandInt(11)
+        local sol = PG.generateSolvedBoard(9, 3, 3, nil, randInt)
+        local puz = PG.createPuzzle(sol, "medium", 9, 3, 3, nil, randInt)
+        local without = LS.solve(puz, 9, 3, 3, nil)
+        local with_nil = LS.solve(puz, 9, 3, 3, nil, { cages = nil })
+        assert.are.equal(without.solved, with_nil.solved)
+        assert.are.equal(without.max_tier, with_nil.max_tier)
+    end)
+
+    it("fills a cage's last cell from what the sum still needs", function()
+        -- Row 1 holds 1,2,3; the cage over those plus R1C4 sums to 10, so the
+        -- fourth cell must be 4 -- which the grid alone also implies, so pin
+        -- the technique rather than just the answer.
+        local grid = { {1,2,3,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }
+        local cages = { { sum = 10, cells = { {r=1,c=1}, {r=1,c=2}, {r=1,c=3}, {r=1,c=4} } } }
+        local step = LS.nextStep(grid, 4, 2, 2, nil, { cages = cages })
+        assert.is_not_nil(step)
+        assert.are.equal(4, step.placements[1].digit)
+    end)
+
+    it("strikes digits no valid cage combination can use", function()
+        -- Two empty cells summing to 3 can only be 1+2, so nothing else may
+        -- stand in either of them.
+        local grid = { {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }
+        local cages = { { sum = 3, cells = { {r=1,c=1}, {r=1,c=2} } } }
+        local cand = LS.candidates(grid, 4, 2, 2, nil)
+        assert.are.equal(4, #cand[1][1])   -- unconstrained without the cage
+
+        local res = LS.solve(grid, 4, 2, 2, nil, { cages = cages, trace = true })
+        local saw_cage = false
+        for _, st in ipairs(res.steps or {}) do
+            if st.technique == "cage_combinations" then saw_cage = true break end
+        end
+        assert.is_true(saw_cage, "cage_combinations never fired")
+    end)
+
+    it("calls a cage that cannot be completed a contradiction", function()
+        -- Two distinct digits from 1..4 cannot add to 20.
+        local grid = { {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }
+        local cages = { { sum = 20, cells = { {r=1,c=1}, {r=1,c=2} } } }
+        local res = LS.solve(grid, 4, 2, 2, nil, { cages = cages })
+        assert.is_false(res.solved)
+        assert.is_true(res.contradiction)
+    end)
+
+    it("applies the 45 rule: one cell uncovered by a unit's cages is forced", function()
+        -- Row 1 of a 4x4 sums to 10. A cage covering its first three cells
+        -- sums to 6, so the fourth cell is 4 -- with no digit given anywhere.
+        local grid = { {0,0,0,0}, {0,0,0,0}, {0,0,0,0}, {0,0,0,0} }
+        local cages = { { sum = 6, cells = { {r=1,c=1}, {r=1,c=2}, {r=1,c=3} } } }
+        local res = LS.solve(grid, 4, 2, 2, nil, { cages = cages, trace = true })
+        local innie
+        for _, st in ipairs(res.steps or {}) do
+            if st.technique == "cage_innie" then innie = st break end
+        end
+        assert.is_not_nil(innie, "cage_innie never fired")
+        assert.are.equal(4, innie.placements[1].digit)
+        assert.are.equal(1, innie.placements[1].r)
+        assert.are.equal(4, innie.placements[1].c)
+    end)
+end)
+
