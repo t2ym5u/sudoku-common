@@ -17,18 +17,23 @@ local time               = require("ui/time")
 local T                  = require("ffi/util").template
 
 -- sudoku-common is vendored independently into each consuming plugin's own
--- common/ dir (see the sudoku_common family in manifest.json) and has no
--- reliable package.path back to game-common's i18n.lua -- unlike that
--- module, this shim carries no custom translation table, just the same
--- callable-plus-lang() shape so showRules()'s EN/FR selection below works
--- without depending on another repo being loaded first.
+-- common/ dir (see the sudoku_common family in manifest.json), so it cannot
+-- count on game-common's i18n.lua being loaded. Each consuming plugin does
+-- ship its own i18n.lua (same callable-plus-lang() shape, and its table
+-- already carries this file's strings), so prefer it when it is reachable and
+-- fall back to a bare gettext shim when it is not -- without the pcall, every
+-- string below would go straight to KOReader's gettext, which knows none of
+-- them, and the whole shared UI would stay English on a French device.
 local koreader_t = require("gettext")
 local function lang()
     return (G_reader_settings and G_reader_settings:readSetting("language") or "en"):sub(1, 2)
 end
-local _ = setmetatable({ lang = lang }, {
-    __call = function(_, s) return koreader_t(s) end,
-})
+local ok_i18n, plugin_i18n = pcall(require, "i18n")
+local _ = (ok_i18n and type(plugin_i18n) == "table" and plugin_i18n.lang)
+    and plugin_i18n
+    or setmetatable({ lang = lang }, {
+        __call = function(_, s) return koreader_t(s) end,
+    })
 
 local DeviceScreen = Device.screen
 
@@ -82,6 +87,43 @@ local function generateWithProgress(board, difficulty, rng)
     end)
     if dialog then dialog:close() end
 end
+
+-- ---------------------------------------------------------------------------
+-- Hints
+--
+-- A hint is deliberately not "here is the answer". onHint() walks the same
+-- logic_solver the generator used, and reveals it in three taps:
+--
+--   1. where to look   -- names the row/column/box that is about to give
+--   2. why             -- names the technique and the digit, and selects the cell
+--   3. the value       -- writes it in (undoable like any other move)
+--
+-- Tapping Hint on an unchanged board advances a level; if the next deduction
+-- has moved elsewhere (the player solved that cell themselves, say) it starts
+-- again at level 1. That is why the level is derived by comparing the target
+-- cell rather than stored as board state -- it cannot go stale.
+-- ---------------------------------------------------------------------------
+
+local logic_solver = require("logic_solver")
+
+-- Digits above 9 render as A-G, matching base_board_widget and the keypad.
+local function digitToChar(d)
+    return d <= 9 and tostring(d) or string.char(55 + d)
+end
+
+-- Named for the player, not for the solver: the point of mentioning the
+-- technique is that it is something they can learn to spot next time.
+local TECHNIQUE_LABELS = {
+    locked_candidates = _("locked candidates"),
+    naked_pair        = _("a naked pair"),
+    hidden_pair       = _("a hidden pair"),
+    naked_triple      = _("a naked triple"),
+    hidden_triple     = _("a hidden triple"),
+    naked_quad        = _("a naked quad"),
+    x_wing            = _("an X-Wing"),
+    swordfish         = _("a Swordfish"),
+    xy_wing           = _("an XY-Wing"),
+}
 
 -- ---------------------------------------------------------------------------
 -- BaseScreen — shared full-screen game UI
@@ -224,6 +266,8 @@ end
 
 function BaseScreen:onNewGame()
     generateWithProgress(self.board, self.board.difficulty)
+    self.board:resetHintsUsed()
+    self.hint_cell = nil
     self.plugin:saveState()
     self.board_widget:refresh()
     self:ensureShowButtonState()
@@ -256,6 +300,118 @@ function BaseScreen:checkProgress()
         self:updateStatus(_("There are mistakes highlighted in red."))
     else
         self:updateStatus(_("Keep going!"))
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Hint button
+-- ---------------------------------------------------------------------------
+
+-- Level 1: point at the unit that is about to give, without saying what.
+function BaseScreen:describeHintArea(step, cell)
+    local kind = step.unit_kind
+    if kind == "row" then
+        return T(_("There is a cell you can solve in row %1."), cell.r)
+    elseif kind == "col" then
+        return T(_("There is a cell you can solve in column %1."), cell.c)
+    elseif kind == "box" then
+        return T(_("There is a cell you can solve in the box around R%1C%2."), cell.r, cell.c)
+    elseif kind == "region" then
+        return T(_("There is a cell you can solve in the shaded region around R%1C%2."), cell.r, cell.c)
+    end
+    -- naked_single: no single unit justifies it, the cell itself is the answer
+    return T(_("There is a cell you can solve in row %1."), cell.r)
+end
+
+-- Level 2: name the technique and the digit. The prerequisite, when there is
+-- one, is the interesting part -- it is what the player had to spot to get a
+-- placement at all -- so mention the hardest one rather than the first.
+function BaseScreen:describeHintReason(step, prereq, cell)
+    local msg
+    local digit = digitToChar(cell.digit)
+    if step.technique == "naked_single" then
+        msg = T(_("R%1C%2 has only one value left."), cell.r, cell.c)
+    elseif step.unit_kind == "row" then
+        msg = T(_("%1 fits in only one cell of row %2."), digit, cell.r)
+    elseif step.unit_kind == "col" then
+        msg = T(_("%1 fits in only one cell of column %2."), digit, cell.c)
+    elseif step.unit_kind == "region" then
+        msg = T(_("%1 fits in only one cell of that region."), digit)
+    else
+        msg = T(_("%1 fits in only one cell of that box."), digit)
+    end
+    local hardest
+    for _idx = 1, #prereq do
+        local candidate = prereq[_idx]
+        if not hardest or candidate.tier > hardest.tier then hardest = candidate end
+    end
+    local label = hardest and TECHNIQUE_LABELS[hardest.technique]
+    if label then
+        msg = msg .. " " .. T(_("You need %1 first."), label)
+    end
+    return msg
+end
+
+function BaseScreen:onHint()
+    local board = self.board
+    if board:isShowingSolution() then
+        self:updateStatus(_("Hide result to keep playing."))
+        return
+    end
+    if board:findWrongEntry() then
+        self.hint_cell = nil
+        self:updateStatus(_("There is a wrong value on the board."))
+        return
+    end
+
+    local step, prereq, reason = logic_solver.nextPlacement(
+        board:getWorkingGrid(), board.n, board.box_rows, board.box_cols,
+        board:getExtraRegions())
+
+    if not step then
+        self.hint_cell = nil
+        if reason == "complete" then
+            self:updateStatus(_("Nothing left to fill in."))
+        else
+            -- Grids from puzzle_generator are deducible by construction, so
+            -- this is reachable only for variants generating their own puzzles
+            -- (sudokukiller's cage layouts) or from a contradictory board.
+            self:updateStatus(_("No purely logical step is available here."))
+        end
+        return
+    end
+
+    local cell = step.placements[1]
+    local prev = self.hint_cell
+    local same = prev and prev.r == cell.r and prev.c == cell.c and prev.digit == cell.digit
+    local level = same and (prev.level + 1) or 1
+    self.hint_cell = { r = cell.r, c = cell.c, digit = cell.digit, level = level }
+
+    if level == 1 then
+        self:updateStatus(self:describeHintArea(step, cell))
+        return
+    end
+    if level == 2 then
+        board:setSelection(cell.r, cell.c)
+        self.board_widget:refresh()
+        self:updateStatus(self:describeHintReason(step, prereq, cell))
+        return
+    end
+
+    local ok, err = board:applyHint(cell.r, cell.c, cell.digit)
+    self.hint_cell = nil
+    if not ok then
+        self:updateStatus(err)
+        return
+    end
+    self.board_widget:refresh()
+    self.plugin:saveState()
+    self:updateUndoButton()
+    self:updateDigitButtons()
+    self:updateStatus(T(_("R%1C%2 = %3. Hints used: %4."),
+        cell.r, cell.c, digitToChar(cell.digit), board:getHintsUsed()))
+    if board:isSolved() then
+        UIManager:show(InfoMessage:new{ text = _("Puzzle complete!"), timeout = 4 })
     end
 end
 
@@ -380,6 +536,7 @@ end
 
 return {
     BaseScreen           = BaseScreen,
+    digitToChar          = digitToChar,
     DIFFICULTY_ORDER     = DIFFICULTY_ORDER,
     DIFFICULTY_LABELS    = DIFFICULTY_LABELS,
     generateWithProgress = generateWithProgress,
