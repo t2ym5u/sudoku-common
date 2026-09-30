@@ -39,8 +39,11 @@ large grids much cheaper to generate.
 really needs, and can be lower than `tier_cap` — a 4×4 grid has no room for an
 X-Wing however hard you dig.
 
-Note that `sudokukiller` does not go through `createPuzzle`: it has its own
-cage-based generator, so this guarantee does not extend to it.
+`sudokukiller` does not go through `createPuzzle` — it has its own cage-based
+generator — but `logic_solver` now reads cage sums (`opts.cages`), so its Easy
+and Medium grids are deducible end to end and its Hint button works. Hard and
+Expert stay genre-pure, carrying no given digits at all, and the cages alone do
+not decide them; there the solver reports honestly that it cannot proceed.
 
 ## Hints
 
