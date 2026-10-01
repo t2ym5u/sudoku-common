@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-10-01
+
+### Added
+- `stats_exporter.lua`, a verbatim copy of game-common's. The two shared
+  libraries are mutually exclusive per plugin -- a sudoku variant mounts
+  sudoku-common and never sees game-common -- but both write the same
+  `game_stats.lua`, so the sudoku variants had no way to report a play
+  session at all. `scripts/check_sudoku_common_drift.sh` now diffs the two
+  copies and fails if they diverge.
+
 ## [1.3.0] - 2026-09-30
 
 ### Added
