@@ -72,12 +72,44 @@ local function drawDashedLine(bb, x, y, w, h, color, dash, gap)
     end
 end
 
+-- Largest face size whose ink box for `sample` fits max_w × max_h pixels.
+--
+-- Measured with an unbounded width: with max_w as the limit sizeUtf8Text cuts
+-- the text at max_w, so a width test against it could never fail. y_top and
+-- y_bottom are ink above and below the baseline, both positive, so the ink
+-- height is their sum (their difference is negative for digits and let every
+-- size through -- digits overflowed their cells). Font:getFace scales the
+-- size it is given by the screen, so the search bound derived from pixels is
+-- divided back by that factor.
+local function fitFontSize(font_name, lo, max_w, max_h, sample)
+    local scale = Screen:scaleBySize(1000) / 1000
+    local hi    = math.max(lo, math.ceil(math.max(max_w, max_h) / scale))
+    local best  = lo
+    while lo <= hi do
+        local mid  = math.floor((lo + hi) / 2)
+        local face = Font:getFace(font_name, mid)
+        local m    = RenderText:sizeUtf8Text(0, Screen:getWidth(), face, sample, true, false)
+        if m.x <= max_w and (m.y_top + m.y_bottom) <= max_h then
+            best = mid
+            lo   = mid + 1
+        else
+            hi   = mid - 1
+        end
+    end
+    return best
+end
+
 -- ---------------------------------------------------------------------------
 -- BaseBoardWidget — shared init / tap / refresh logic
 --
 -- Subclasses must implement :paintTo(bb, x, y).
 -- Subclasses may override :init() and call BaseBoardWidget.init(self) first
 -- to add variant-specific font setup (e.g. cage sum labels).
+--
+-- Options:
+--   board    — the board model (required)
+--   max_size — side in pixels; overrides the default 0.82 × the short screen
+--              side when set (see BaseScreen:getBoardMaxSize)
 -- ---------------------------------------------------------------------------
 
 local BaseBoardWidget = InputContainer:extend{
@@ -93,17 +125,13 @@ function BaseBoardWidget:init()
     self.box_cols = box_cols
 
     self.size = math.floor(math.min(Screen:getWidth(), Screen:getHeight()) * 0.82)
+    -- A screen that knows how much room it has (BaseScreen:getBoardBudget)
+    -- passes it here instead of relying on a fixed ratio of the screen.
     if self.max_size then
-        self.size = math.min(self.size, math.max(self.max_size, 80))
+        self.size = math.max(n, math.floor(self.max_size))
     end
     self.dimen = Geom:new{ w = self.size, h = self.size }
     self.paint_rect = Geom:new{ x = 0, y = 0, w = self.size, h = self.size }
-    self.number_face = Font:getFace("cfont", math.max(28, math.floor(self.size / 14)))
-    self.note_face   = Font:getFace("smallinfofont", math.max(16, math.floor(self.size / 28)))
-    self.number_face_size  = self.number_face.size
-    self.number_cell_padding = 0
-    self.note_face_size    = self.note_face.size
-    self.note_mini_padding = 0
 
     -- Note font: sized to fit in a mini cell (cell/box_cols × cell/box_rows)
     do
@@ -115,20 +143,14 @@ function BaseBoardWidget:init()
         local safety  = math.max(1, math.floor(mini / 18))
         local max_w   = math.max(1, math.floor(mini_w - 2 * padding - safety))
         local max_h   = math.max(1, math.floor(mini_h - 2 * padding - safety))
-        local size    = self.note_face_size
-        while size > 8 do
-            local face = Font:getFace("smallinfofont", size)
-            local m    = RenderText:sizeUtf8Text(0, max_w, face, "8", true, false)
-            local h    = m.y_bottom - m.y_top
-            if m.x <= max_w and h <= max_h then
-                local final_size = math.max(8, size - 2)
-                self.note_face      = Font:getFace("smallinfofont", final_size)
-                self.note_face_size = final_size
-                self.note_mini_padding = padding
-                break
-            end
-            size = size - 1
-        end
+        -- The floor stays low: at 16x16 a mini cell is ~14 px on a 300 dpi
+        -- screen, and the old floor of 8 (~15 px there) overflowed it, so the
+        -- top row of notes was clipped by the cell border.
+        local size    = math.max(5, fitFontSize("smallinfofont", 5, max_w, max_h,
+                              n > 9 and "G" or "8") - 1)
+        self.note_face         = Font:getFace("smallinfofont", size)
+        self.note_face_size    = size
+        self.note_mini_padding = padding
     end
 
     -- Number font: sized to fit in a full cell
@@ -138,20 +160,11 @@ function BaseBoardWidget:init()
         local safety  = math.max(1, math.floor(cell / 20))
         local max_w   = math.max(1, math.floor(cell - 2 * padding - safety))
         local max_h   = math.max(1, math.floor(cell - 2 * padding - safety))
-        local size    = self.number_face_size
-        while size > 10 do
-            local face = Font:getFace("cfont", size)
-            local m    = RenderText:sizeUtf8Text(0, max_w, face, "8", true, false)
-            local h    = m.y_bottom - m.y_top
-            if m.x <= max_w and h <= max_h then
-                local final_size = math.max(10, size - 4)
-                self.number_face      = Font:getFace("cfont", final_size)
-                self.number_face_size = final_size
-                self.number_cell_padding = padding
-                break
-            end
-            size = size - 1
-        end
+        local size    = math.max(10, fitFontSize("cfont", 10, max_w, max_h,
+                              n > 9 and "G" or "8") - 2)
+        self.number_face         = Font:getFace("cfont", size)
+        self.number_face_size    = size
+        self.number_cell_padding = padding
     end
 
     self.ges_events = {
@@ -209,4 +222,5 @@ return {
     drawDiagonalLine = drawDiagonalLine,
     drawConflictMark = drawConflictMark,
     drawDashedLine   = drawDashedLine,
+    fitFontSize      = fitFontSize,
 }

@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-10-30
+
+### Added
+- Shared screen layout for the eight variants, matching game-common's:
+  `getGutter()`, `getControlsWidth()`, `buildActionBar()`, `buildNumberPad()`
+  (up to nine digits on one row, two even rows for 12 and 16), `joinStatus()`,
+  `getBoardBudget()`, plus `buildKeypadControls()`, `getBoardMaxSize()` and
+  `placeBoard()`, which build the pad, the tool bar and a board that fills the
+  room they leave, in portrait and landscape.
+- A shared `updateStatus()`: "9×9 · Medium · Empty: 45", with variants adding
+  their own parts through `getStatusExtra()`.
+- `BaseBoardWidget` takes `max_size`, and `fitFontSize()` sizes digits and
+  notes to their cell.
+- Round-over action bar: once the puzzle is solved, the tool bar shows "New
+  game" in place of Note/Erase/Check/Hint/Undo, at the same height, and an
+  Undo that un-solves the grid brings the tools back.
+
+### Changed
+- "Show result" / "Hide result" read "Show solution" / "Hide solution", like
+  every other game's menu.
+
+### Fixed
+- Digits overflowed their cells: the font fit accepted every size (it
+  measured with the cell width as the cut-off and took a negative ink height).
+- 16×16 notes were clipped: their font had a floor too big for a 14 px mini
+  cell, and box lines covered the first row of notes.
+
 ## [1.4.0] - 2026-10-01
 
 ### Added

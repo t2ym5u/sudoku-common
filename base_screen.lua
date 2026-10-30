@@ -1,18 +1,24 @@
 local ButtonDialog       = require("ui/widget/buttondialog")
 local ButtonTable        = require("ui/widget/buttontable")
+local CenterContainer    = require("ui/widget/container/centercontainer")
 local Blitbuffer         = require("ffi/blitbuffer")
 local Device             = require("device")
 local Font               = require("ui/font")
+local FrameContainer     = require("ui/widget/container/framecontainer")
 local Geom               = require("ui/geometry")
+local HorizontalGroup    = require("ui/widget/horizontalgroup")
+local HorizontalSpan     = require("ui/widget/horizontalspan")
 local InfoMessage        = require("ui/widget/infomessage")
 local InputContainer     = require("ui/widget/container/inputcontainer")
 local ProgressbarDialog  = require("ui/widget/progressbardialog")
+local Size               = require("ui/size")
 local TextViewer         = require("ui/widget/textviewer")
 local TextWidget         = require("ui/widget/textwidget")
 local TitleBar           = require("ui/widget/titlebar")
 local UIManager          = require("ui/uimanager")
 local VerticalGroup      = require("ui/widget/verticalgroup")
 local VerticalSpan       = require("ui/widget/verticalspan")
+local WidgetContainer    = require("ui/widget/container/widgetcontainer")
 local time               = require("ui/time")
 local T                  = require("ffi/util").template
 
@@ -126,6 +132,46 @@ local TECHNIQUE_LABELS = {
 }
 
 -- ---------------------------------------------------------------------------
+-- ActionBar -- the bottom ButtonTable, swappable in place
+--
+-- Once a round is over, the game's actions (Check, Hint, Undo...) have nothing
+-- left to act on, and starting the next round used to mean opening the title-bar
+-- menu. So the bar then shows the round-over buttons instead (one full-width
+-- "New game" by default), kept at the bar's height so nothing else moves.
+-- getButtonById still reaches the normal buttons while they are hidden.
+-- ---------------------------------------------------------------------------
+
+local ActionBar = WidgetContainer:extend{
+    width      = nil,
+    rows       = nil,
+    round_over = false,
+}
+
+function ActionBar:init()
+    self.normal = ButtonTable:new{ width = self.width, buttons = self.rows }
+    self.normal_h = self.normal:getSize().h
+    self:setRoundOverButtons(self.over_row)
+end
+
+-- over_row: one row of ButtonTable button specs, or nil for the normal bar.
+function ActionBar:setRoundOverButtons(over_row)
+    self.round_over = over_row ~= nil
+    if not over_row then
+        self[1] = self.normal
+        return
+    end
+    local bt = ButtonTable:new{ width = self.width, buttons = { over_row } }
+    self[1] = CenterContainer:new{
+        dimen = Geom:new{ w = self.width, h = math.max(self.normal_h, bt:getSize().h) },
+        bt,
+    }
+end
+
+function ActionBar:getButtonById(id)
+    return self.normal:getButtonById(id)
+end
+
+-- ---------------------------------------------------------------------------
 -- BaseScreen — shared full-screen game UI
 --
 -- Subclasses must implement:
@@ -134,7 +180,6 @@ local TECHNIQUE_LABELS = {
 --   :openDifficultyMenu()    — shows difficulty picker
 --   :updateStatus([msg])     — refreshes status bar text
 -- ---------------------------------------------------------------------------
-
 local BaseScreen = InputContainer:extend{}
 
 function BaseScreen:init()
@@ -286,7 +331,7 @@ end
 
 function BaseScreen:ensureShowButtonState()
     if not self.show_result_button then return end
-    local text = self.board:isShowingSolution() and _("Hide result") or _("Show result")
+    local text = self.board:isShowingSolution() and _("Hide solution") or _("Show solution")
     self.show_result_button:setText(text, self.show_result_button.width)
 end
 
@@ -355,7 +400,7 @@ end
 function BaseScreen:onHint()
     local board = self.board
     if board:isShowingSolution() then
-        self:updateStatus(_("Hide result to keep playing."))
+        self:updateStatus(_("Hide solution to keep playing."))
         return
     end
     if board:findWrongEntry() then
@@ -510,6 +555,253 @@ function BaseScreen:buildPortraitLayout(header, content, footer)
     if footer  then items[#items+1] = footer  end
     self.layout = VerticalGroup:new(items)
     self[1] = self.layout
+end
+
+-- ---------------------------------------------------------------------------
+-- Shared controls
+--
+-- Same names and semantics as game-common/screen_base.lua, so the sudoku
+-- family and every other game build their action bar, number pad and status
+-- line through one API: full-width rows of equal buttons (no
+-- shrink_unneeded_width, which centred a cramped cluster of labels and left
+-- each game with a different footprint), and status parts joined with one
+-- separator.
+-- ---------------------------------------------------------------------------
+
+-- Outer gutter between the screen edge and the board or the controls.
+function BaseScreen:getGutter()
+    return Size.padding.large
+end
+
+function BaseScreen:isLandscape()
+    return DeviceScreen:getWidth() > DeviceScreen:getHeight()
+end
+
+-- Width of the controls column: the screen minus its gutters in portrait, a
+-- side panel next to the board in landscape.
+function BaseScreen:getControlsWidth()
+    local sw = self.dimen.w
+    if self:isLandscape() then
+        return math.floor(sw * 0.36)
+    end
+    return sw - 2 * self:getGutter()
+end
+
+-- rows: either one row ({ btn, btn, ... }) or a list of rows. Each btn is a
+-- ButtonTable button spec ({ text, callback, id, enabled, ... }).
+-- The bar is remembered as self.action_bar (the last one built), which is the
+-- one refreshActionBar() swaps when the round ends.
+function BaseScreen:buildActionBar(rows, width)
+    if rows[1] and rows[1].text then rows = { rows } end
+    local bar = ActionBar:new{
+        width    = width or self:getControlsWidth(),
+        rows     = rows,
+        over_row = self:isRoundOver() and self:getRoundOverButtons() or nil,
+    }
+    self.action_bar = bar
+    return bar
+end
+
+-- Round-over hooks: once the puzzle is solved, the action bar offers a new one
+-- in place of the editing tools. setStatusText() re-checks after every move.
+function BaseScreen:isRoundOver()
+    return self.board:isSolved() and not self.board:isShowingSolution()
+end
+
+function BaseScreen:getRoundOverButtons()
+    return { { text = _("New game"), callback = function() self:onNewGame() end } }
+end
+
+function BaseScreen:refreshActionBar()
+    local bar = self.action_bar
+    if not bar then return end
+    local over = self:isRoundOver() and true or false
+    if over == bar.round_over then return end
+    bar:setRoundOverButtons(over and self:getRoundOverButtons() or nil)
+    UIManager:setDirty(self, function() return "ui", self.dimen end)
+end
+
+-- keys: list of ButtonTable button specs, one per value. Up to nine keys fit
+-- on one row; more are split over two even rows (16 becomes 8 + 8).
+function BaseScreen:buildNumberPad(keys, width)
+    local per_row = #keys <= 9 and #keys or math.ceil(#keys / 2)
+    local rows, row = {}, {}
+    for i, key in ipairs(keys) do
+        row[#row + 1] = key
+        if #row == per_row or i == #keys then
+            rows[#rows + 1] = row
+            row = {}
+        end
+    end
+    return ButtonTable:new{
+        width   = width or self:getControlsWidth(),
+        buttons = rows,
+    }
+end
+
+-- The one status separator. nil and "" parts are dropped, so callers can
+-- pass optional parts inline: self:joinStatus(size, diff, extra_or_nil).
+BaseScreen.STATUS_SEP = " · "
+
+function BaseScreen:joinStatus(...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        local p = select(i, ...)
+        if p ~= nil and p ~= "" then parts[#parts + 1] = tostring(p) end
+    end
+    return table.concat(parts, BaseScreen.STATUS_SEP)
+end
+
+-- Room left for the board (including its frame) once the title bar and the
+-- controls are placed. `controls` is the widget that will sit under the board
+-- in portrait (status + pads + action bar), or beside it in landscape.
+-- Returns w, h.
+function BaseScreen:getBoardBudget(title_bar, controls)
+    local g  = self:getGutter()
+    local sw, sh = self.dimen.w, self.dimen.h
+    local avail_h = sh - (title_bar and title_bar:getSize().h or 0)
+    if self:isLandscape() then
+        return sw - self:getControlsWidth() - 3 * g, avail_h - 2 * g
+    end
+    return sw - 2 * g, avail_h - (controls and controls:getSize().h or 0) - 3 * g
+end
+
+-- ---------------------------------------------------------------------------
+-- Sudoku layout
+--
+-- Every variant has the same screen: a square board, then the status line,
+-- the digit pad (one row of up to nine, two rows for 12 and 16) and the tool
+-- bar. A variant's buildLayout() therefore reduces to:
+--
+--   local title_bar = self:buildTitleBar(...)
+--   local controls  = self:buildKeypadControls()
+--   self.board_widget = XBoardWidget:new{ board = self.board,
+--       max_size = self:getBoardMaxSize(title_bar, controls), ... }
+--   self:placeBoard(title_bar, self.board_widget, controls)
+-- ---------------------------------------------------------------------------
+
+-- The board widgets draw their own thick outer line, so the frame around them
+-- is padding only -- a bordered frame made a second box around the grid.
+local BOARD_FRAME_PADDING = Size.padding.large
+
+-- Status line + digit pad + tool bar. Wires self.note_button,
+-- self.undo_button and self.digit_buttons[d] (ids "digit_<d>").
+function BaseScreen:buildKeypadControls()
+    local n = self.board.n
+    local keys = {}
+    for d = 1, n do
+        keys[d] = {
+            id = "digit_" .. d, text = digitToChar(d),
+            callback = function() self:onDigit(d) end,
+        }
+    end
+    local pad = self:buildNumberPad(keys)
+    local note  = { id = "note_button", text = self:getNoteButtonText(),
+                    callback = function() self:toggleNoteMode() end }
+    local erase = { text = _("Erase"), callback = function() self:onErase() end }
+    local check = { text = _("Check"), callback = function() self:checkProgress() end }
+    local hint  = { text = _("Hint"),  callback = function() self:onHint() end }
+    local undo  = { id = "undo_button", text = _("Undo"),
+                    callback = function() self:onUndo() end }
+    -- Five tools in the narrow landscape side panel wrapped "Note: Off" and
+    -- shrank every label, so there they go on two rows: editing, then help.
+    local bar = self:buildActionBar(self:isLandscape()
+        and { { note, erase, undo }, { check, hint } }
+        or  { note, erase, check, hint, undo })
+    self.note_button   = bar:getButtonById("note_button")
+    self.undo_button   = bar:getButtonById("undo_button")
+    self.digit_buttons = {}
+    for d = 1, n do
+        self.digit_buttons[d] = pad:getButtonById("digit_" .. d)
+    end
+
+    self.status_text:setMaxWidth(self:getControlsWidth())
+    return VerticalGroup:new{
+        align = "center",
+        self.status_text,
+        VerticalSpan:new{ width = Size.span.vertical_large },
+        pad,
+        VerticalSpan:new{ width = Size.span.vertical_default },
+        bar,
+    }
+end
+
+-- Side of the square board widget that fills the room the controls leave.
+function BaseScreen:getBoardMaxSize(title_bar, controls)
+    local budget_w, budget_h = self:getBoardBudget(title_bar, controls)
+    return math.min(budget_w, budget_h) - 2 * BOARD_FRAME_PADDING
+end
+
+function BaseScreen:placeBoard(title_bar, board_widget, controls)
+    local board_frame = FrameContainer:new{
+        padding    = BOARD_FRAME_PADDING,
+        margin     = 0,
+        bordersize = 0,
+        board_widget,
+    }
+    if self:isLandscape() then
+        self:buildLandscapeLayout(title_bar, HorizontalGroup:new{
+            align = "center",
+            board_frame,
+            HorizontalSpan:new{ width = self:getGutter() },
+            controls,
+        })
+    else
+        self:buildPortraitLayout(title_bar, board_frame, VerticalGroup:new{
+            align = "center",
+            controls,
+            VerticalSpan:new{ width = self:getGutter() },
+        })
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Status bar
+-- ---------------------------------------------------------------------------
+
+-- Size and difficulty, the first two parts of every variant's status line.
+function BaseScreen:getStatusPrefix()
+    return T("%1×%1", self.board.n),
+        DIFFICULTY_LABELS[self.board.difficulty] or self.board.difficulty
+end
+
+-- Changing the status text changes its width, and VerticalGroup caches both
+-- its own size and each child's offset the first time it is measured. Without
+-- invalidating that, a status line longer than the one present when the layout
+-- was built keeps the *old* centring and runs off the right edge.
+local function resetLayoutTree(widget, depth)
+    if type(widget) ~= "table" or (depth or 0) > 6 then return end
+    if widget.resetLayout then widget:resetLayout() end
+    for i = 1, #widget do resetLayoutTree(widget[i], (depth or 0) + 1) end
+end
+
+-- Every move ends in a status update, so this is also where the action bar
+-- learns that the puzzle has just been solved (or un-solved by an undo).
+function BaseScreen:setStatusText(text)
+    self.status_text:setText(text or "")
+    self:refreshActionBar()
+    if self.layout then resetLayoutTree(self.layout, 0) end
+    UIManager:setDirty(self, function() return "ui", self.dimen end)
+end
+
+-- Default status: "9×9 · Medium · Empty: 45", or a plain sentence once the
+-- result is shown or the puzzle is solved. Variants append their own parts
+-- through getStatusExtra().
+function BaseScreen:updateStatus(message)
+    local status = message
+    if not status then
+        if self.board:isShowingSolution() then
+            status = _("Result is being shown; editing is disabled.")
+        elseif self.board:isSolved() then
+            status = _("Congratulations! Puzzle solved.")
+        else
+            local size, diff = self:getStatusPrefix()
+            status = self:joinStatus(size, diff,
+                T(_("Empty: %1"), self.board:getRemainingCells()),
+                self.getStatusExtra and self:getStatusExtra() or nil)
+        end
+    end
+    self:setStatusText(status)
 end
 
 -- ---------------------------------------------------------------------------

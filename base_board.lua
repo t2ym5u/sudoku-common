@@ -106,7 +106,7 @@ end
 
 function BaseBoard:setValue(value)
     if self.reveal_solution then
-        return false, _("Hide result to keep playing.")
+        return false, _("Hide solution to keep playing.")
     end
     local row, col = self:getSelection()
     if self:isGiven(row, col) then
@@ -193,7 +193,7 @@ end
 
 function BaseBoard:toggleNoteDigit(value)
     if self.reveal_solution then
-        return false, _("Hide result to keep playing.")
+        return false, _("Hide solution to keep playing.")
     end
     local row, col = self:getSelection()
     if self:isGiven(row, col) then
@@ -325,7 +325,7 @@ end
 -- it landed. Goes through setValue, so it is undoable like any other move.
 function BaseBoard:applyHint(row, col, digit)
     if self.reveal_solution then
-        return false, _("Hide result to keep playing.")
+        return false, _("Hide solution to keep playing.")
     end
     self:setSelection(row, col)
     local ok, err = self:setValue(digit)
