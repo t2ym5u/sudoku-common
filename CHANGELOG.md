@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-11-04
+
+### Fixed
+- A sudoku no longer runs on an outdated `logic_solver`, `sudoku_grid_utils`
+  or `stats_exporter` left in Lua's shared module cache by an older sudoku
+  variant still installed: `module_guard.lua` (a verbatim copy of
+  game-common's) replaces such copies with the variant's own.
+
+### Added
+- `module_guard.lua` and `sudoku_common_version.lua` (this copy's version and
+  module list; bump `version` with every release, a spec checks it against
+  this changelog).
+
 ## [1.7.0] - 2026-11-04
 
 ### Changed

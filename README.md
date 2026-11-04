@@ -14,6 +14,8 @@ Shared library for all Sudoku-variant plugins in this repository
 | `sudoku_grid_utils.lua` | Grid helpers — `emptyGrid`, `copyGrid`, `cloneNoteCell` |
 | `puzzle_generator.lua` | Puzzle generator parameterised by box shape — digs clues out against `logic_solver` so what remains is always deducible |
 | `logic_solver.lua` | Human-technique solver (singles → locked candidates → subsets → fish/XY-wing). Grades a grid's difficulty, and answers "what is the next deduction here?" — the engine behind both generation and the Hint button |
+| `module_guard.lua` | Verbatim copy of game-common's (`scripts/check_sudoku_common_drift.sh` diffs them): loaded by path from each variant's main.lua, it drops shared modules an older variant left in Lua's per-name cache so no variant runs on modules older than its own |
+| `sudoku_common_version.lua` | This copy's version and module list for `module_guard.lua` — **bump `version` with every release** (a spec checks it against CHANGELOG.md) |
 
 ## Pure-logic guarantee
 
