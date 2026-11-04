@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-11-04
+
+### Changed
+- Generating a puzzle is faster in every variant, and deals the same
+  puzzles: the deduction solver that vets each clue the generator digs out
+  skips every digit, subset and fish that cannot produce a step (one pass per
+  unit builds the masks that used to be rescanned digit by digit), and its
+  inner loops no longer create closures or recurse, which LuaJIT could not
+  compile and which kept flushing its trace cache. Worst case on a desktop:
+  9×9 Expert 54 → 35 ms, 12×12 Expert 167 → 90 ms, 16×16 Hard 0.9 → 0.13 s,
+  16×16 Expert 1.06 → 0.21 s (about 5 s instead of 26 s on a Kobo).
+- Windoku and Sudoku X fill their solution grid by bitmask backtracking on the
+  most constrained cell or digit, restarting a fill that wanders past a fixed
+  number of placements (a count, never a timer, so a seed still gives the
+  same grid on every device). Worst case 0.34 s → 13 ms on a desktop; it was
+  80% of generating a Windoku. These two variants deal different puzzles for
+  a given seed than 1.5.0; every other variant deals the same ones.
+
+### Added
+- `test_logic_solver_spec.lua` pins the 1.5.0 output of seeded generation
+  (checksums over 9×9, 6×6, 12×12 and a windoku grid), so a later speed-up
+  cannot change the puzzles unnoticed, and checks that windoku/sudokux fills
+  respect every region and repeat for the same seed.
+
 ## [1.5.0] - 2026-10-30
 
 ### Added

@@ -65,7 +65,25 @@ M.DIFFICULTY_TIER = {
 -- Bit helpers
 -- ---------------------------------------------------------------------------
 
+-- Grids go up to 16x16, so every mask here fits in 16 bits: popcount is two
+-- byte lookups, and lowestDigit a lookup on the isolated lowest bit. The
+-- solver calls both on every cell of every unit, many times per dug clue.
+local POP8 = {}
+for i = 0, 255 do
+    local c, x = 0, i
+    while x ~= 0 do
+        x = band(x, x - 1)
+        c = c + 1
+    end
+    POP8[i] = c
+end
+local LOW_DIGIT = {}
+for d = 1, 31 do LOW_DIGIT[lshift(1, d - 1)] = d end
+
 local function popcount(x)
+    if x >= 0 and x < 65536 then
+        return POP8[band(x, 255)] + POP8[rshift(x, 8)]
+    end
     local c = 0
     while x ~= 0 do
         x = band(x, x - 1)
@@ -76,13 +94,7 @@ end
 
 -- Digit (1-based) of the lowest set bit. Undefined for 0.
 local function lowestDigit(mask)
-    local m = band(mask, -mask)
-    local d = 0
-    while m > 1 do
-        m = rshift(m, 1)
-        d = d + 1
-    end
-    return d + 1
+    return LOW_DIGIT[band(mask, -mask)] or 1
 end
 
 local function digitsOf(mask)
@@ -95,23 +107,49 @@ local function digitsOf(mask)
     return out
 end
 
--- Calls fn(pick) for every k-subset of list, stopping early if fn returns a
--- truthy value (which is then returned). pick is reused between calls -- copy
--- it if you need to keep it.
-local function combinations(list, k, fn)
+-- Calls fn(env, pick) for every k-subset of list whose masks (mask_of[item],
+-- a bitmask per item) together span exactly k bits -- the only subsets the
+-- subset and fish techniques can use -- in lexicographic order, stopping
+-- early if fn returns a truthy value (which is then returned). A branch whose
+-- partial union already spans more than k bits is cut, since adding items
+-- can only grow it: on a 16x16 grid that skips most of the C(16, 4) quads.
+-- pick is reused between calls -- copy it if you need to keep it.
+--
+-- Written without closures (fn gets what it needs through env) and without
+-- recursion, as an explicit walk over the subset indices, because LuaJIT
+-- compiles neither well, and this runs for every unit on every step the
+-- solver takes once singles run dry.
+local function combinations(list, mask_of, k, fn, env)
     local m = #list
     if m < k then return nil end
-    local pick = {}
-    local function rec(start, depth)
-        if depth > k then return fn(pick) end
-        for i = start, m - (k - depth) do
-            pick[depth] = list[i]
-            local hit = rec(i + 1, depth + 1)
-            if hit then return hit end
+    -- idx[d]: position in list picked at depth d; acc[d]: union of the
+    -- masks picked at depths 1..d (acc[0] = 0).
+    local pick, idx, acc = {}, { 0 }, { [0] = 0 }
+    local depth = 1
+    while depth >= 1 do
+        local i, limit = idx[depth] + 1, m - (k - depth)
+        local u = 0
+        while i <= limit do
+            u = bor(acc[depth - 1], mask_of[list[i]])
+            if popcount(u) <= k then break end
+            i = i + 1
         end
-        return nil
+        if i > limit then
+            depth = depth - 1
+        else
+            idx[depth], pick[depth], acc[depth] = i, list[i], u
+            if depth == k then
+                if popcount(u) == k then
+                    local hit = fn(env, pick)
+                    if hit then return hit end
+                end
+            else
+                depth = depth + 1
+                idx[depth] = i
+            end
+        end
     end
-    return rec(1, 1)
+    return nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -203,6 +241,30 @@ local function buildContext(n, box_rows, box_cols, extra_regions)
         end
     end
 
+    -- Overlaps: for each unit u, every other unit v sharing at least two
+    -- cells with it, with the cells of u outside v and of v outside u. Only
+    -- such a pair can lock a digit (see lockedCandidates).
+    ctx.overlaps = {}
+    for u = 1, #ctx.units do
+        local list = {}
+        for v = 1, #ctx.units do
+            if v ~= u then
+                local shared, u_only, v_only = 0, {}, {}
+                local in_u, in_v = ctx.in_unit[u], ctx.in_unit[v]
+                for _, idx in ipairs(ctx.units[u]) do
+                    if in_v[idx] then shared = shared + 1 else u_only[#u_only + 1] = idx end
+                end
+                if shared >= 2 then
+                    for _, idx in ipairs(ctx.units[v]) do
+                        if not in_u[idx] then v_only[#v_only + 1] = idx end
+                    end
+                    list[#list + 1] = { u_only = u_only, v_only = v_only }
+                end
+            end
+        end
+        ctx.overlaps[u] = list
+    end
+
     -- Peers: every cell sharing at least one unit. Used to propagate a
     -- placement and, in xy_wing, to ask "does this cell see both wings?".
     for idx = 1, ctx.cells do
@@ -261,15 +323,24 @@ local function place(ctx, st, idx, digit)
         st.broken = true
         return false
     end
-    st.value[idx] = digit
-    st.cand[idx]  = 0
-    st.unsolved   = st.unsolved - 1
+    local value, cand = st.value, st.cand
+    value[idx] = digit
+    cand[idx]  = 0
+    st.unsolved = st.unsolved - 1
+    local keep = bnot(m)
     for _, p in ipairs(ctx.peers[idx]) do
-        if st.value[p] == digit then
+        if value[p] == digit then
             st.broken = true
             return false
         end
-        eliminate(ctx, st, p, digit)
+        -- eliminate(ctx, st, p, digit), inlined: this is the solver's
+        -- innermost loop.
+        local cur = cand[p]
+        if band(cur, m) ~= 0 then
+            local nc = band(cur, keep)
+            cand[p] = nc
+            if nc == 0 and value[p] == 0 then st.broken = true end
+        end
     end
     return not st.broken
 end
@@ -326,7 +397,8 @@ end
 
 local function nakedSingle(ctx, st)
     for idx = 1, ctx.cells do
-        if st.value[idx] == 0 and popcount(st.cand[idx]) == 1 then
+        local cand = st.cand[idx]
+        if st.value[idx] == 0 and cand ~= 0 and band(cand, cand - 1) == 0 then
             local d    = lowestDigit(st.cand[idx])
             local r, c = rc(ctx, idx)
             return {
@@ -341,21 +413,44 @@ local function nakedSingle(ctx, st)
     return nil
 end
 
+-- One pass over a unit's cells: which digits are placed in it, and which are
+-- still a candidate in at least one / at least two of its open cells. The
+-- per-digit scans of hiddenSingle and lockedCandidates only ever act on a
+-- digit that is unplaced and held once (resp. twice or more), so these masks
+-- let them skip every other digit without changing what they find.
+local function unitDigitMasks(st, cells)
+    local placed, once, twice = 0, 0, 0
+    local value, cand = st.value, st.cand
+    for i = 1, #cells do
+        local idx = cells[i]
+        local v = value[idx]
+        if v ~= 0 then
+            placed = bor(placed, lshift(1, v - 1))
+        else
+            local cm = cand[idx]
+            twice = bor(twice, band(once, cm))
+            once  = bor(once, cm)
+        end
+    end
+    return placed, once, twice
+end
+
 local function hiddenSingle(ctx, st)
     for u = 1, #ctx.units do
         local cells = ctx.units[u]
-        for d = 1, ctx.n do
-            local m, count, hit, placed = lshift(1, d - 1), 0, nil, false
+        local placed, once, twice = unitDigitMasks(st, cells)
+        local single = band(band(once, bnot(twice)), bnot(placed))
+        while single ~= 0 do
+            local m   = band(single, -single)
+            local d   = lowestDigit(m)
+            local hit
             for _, idx in ipairs(cells) do
-                if st.value[idx] == d then
-                    placed = true
+                if st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
+                    hit = idx
                     break
-                elseif st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
-                    count = count + 1
-                    hit   = idx
                 end
             end
-            if not placed and count == 1 and popcount(st.cand[hit]) > 1 then
+            if popcount(st.cand[hit]) > 1 then
                 local r, c = rc(ctx, hit)
                 return {
                     technique  = "hidden_single",
@@ -363,9 +458,11 @@ local function hiddenSingle(ctx, st)
                     digit      = d,
                     unit_kind  = ctx.unit_kind[u],
                     placements = { { r = r, c = c, digit = d } },
-                    focus      = cellList(ctx, cells),
+                    -- Nobody reads the focus of a step the generator takes.
+                    focus      = not st.lean and cellList(ctx, cells) or nil,
                 }
             end
+            single = band(single, single - 1)
         end
     end
     return nil
@@ -379,17 +476,38 @@ end
 local function lockedCandidates(ctx, st)
     for u = 1, #ctx.units do
         local cells = ctx.units[u]
-        for d = 1, ctx.n do
-            local m, holders, placed = lshift(1, d - 1), {}, false
+        local placed, _, twice = unitDigitMasks(st, cells)
+        local multi = band(twice, bnot(placed))
+        -- Cheap filter first: a digit can only produce a step if, for some
+        -- overlapping unit v, none of u's cells outside v can take it while
+        -- some of v's cells outside u still can. Digits failing that for
+        -- every v are skipped; the rest go through the exact search below,
+        -- so the step found is the same as without the filter.
+        local useful = 0
+        if multi ~= 0 then
+            local cand = st.cand
+            for _, ov in ipairs(ctx.overlaps[u]) do
+                local outside_v, outside_u = 0, 0
+                for _, idx in ipairs(ov.u_only) do outside_v = bor(outside_v, cand[idx]) end
+                local locked = band(multi, bnot(outside_v))
+                if locked ~= 0 then
+                    for _, idx in ipairs(ov.v_only) do outside_u = bor(outside_u, cand[idx]) end
+                    useful = bor(useful, band(locked, outside_u))
+                end
+            end
+        end
+        multi = useful
+        while multi ~= 0 do
+            local m = band(multi, -multi)
+            local d = lowestDigit(m)
+            multi = band(multi, multi - 1)
+            local holders = {}
             for _, idx in ipairs(cells) do
-                if st.value[idx] == d then
-                    placed = true
-                    break
-                elseif st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
+                if st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
                     holders[#holders + 1] = idx
                 end
             end
-            if not placed and #holders >= 2 then
+            if #holders >= 2 then   -- always: multi only keeps digits held twice
                 -- Any unit covering all holders must be one of the first
                 -- holder's units, so there are at most a handful to test.
                 local is_holder = {}
@@ -431,7 +549,40 @@ end
 
 -- Naked subset of size k: k cells in a unit whose candidates together span
 -- exactly k digits -- those digits are spoken for, strike them elsewhere.
+local function nakedSubsetPick(env, pick)
+    local ctx, st, k, cells = env.ctx, env.st, env.k, env.cells
+    local union = 0
+    for i = 1, k do union = bor(union, st.cand[pick[i]]) end
+    if popcount(union) ~= k then return nil end
+    local in_pick = {}
+    for i = 1, k do in_pick[pick[i]] = true end
+    local elims = {}
+    for _, idx in ipairs(cells) do
+        if st.value[idx] == 0 and not in_pick[idx] then
+            local shared = band(st.cand[idx], union)
+            if shared ~= 0 then
+                local r, c = rc(ctx, idx)
+                for _, d in ipairs(digitsOf(shared)) do
+                    elims[#elims + 1] = { r = r, c = c, digit = d }
+                end
+            end
+        end
+    end
+    if #elims == 0 then return nil end
+    local picked = {}
+    for i = 1, k do picked[i] = pick[i] end
+    return {
+        technique    = env.technique,
+        tier         = env.tier,
+        unit_kind    = ctx.unit_kind[env.u],
+        digits       = digitsOf(union),
+        eliminations = elims,
+        focus        = cellList(ctx, picked),
+    }
+end
+
 local function nakedSubset(ctx, st, k, technique, tier)
+    local env = { ctx = ctx, st = st, k = k, technique = technique, tier = tier }
     for u = 1, #ctx.units do
         local cells = ctx.units[u]
         local pool  = {}
@@ -441,36 +592,8 @@ local function nakedSubset(ctx, st, k, technique, tier)
                 pool[#pool + 1] = idx
             end
         end
-        local step = combinations(pool, k, function(pick)
-            local union = 0
-            for i = 1, k do union = bor(union, st.cand[pick[i]]) end
-            if popcount(union) ~= k then return nil end
-            local in_pick = {}
-            for i = 1, k do in_pick[pick[i]] = true end
-            local elims = {}
-            for _, idx in ipairs(cells) do
-                if st.value[idx] == 0 and not in_pick[idx] then
-                    local shared = band(st.cand[idx], union)
-                    if shared ~= 0 then
-                        local r, c = rc(ctx, idx)
-                        for _, d in ipairs(digitsOf(shared)) do
-                            elims[#elims + 1] = { r = r, c = c, digit = d }
-                        end
-                    end
-                end
-            end
-            if #elims == 0 then return nil end
-            local picked = {}
-            for i = 1, k do picked[i] = pick[i] end
-            return {
-                technique    = technique,
-                tier         = tier,
-                unit_kind    = ctx.unit_kind[u],
-                digits       = digitsOf(union),
-                eliminations = elims,
-                focus        = cellList(ctx, picked),
-            }
-        end)
+        env.u, env.cells = u, cells
+        local step = combinations(pool, st.cand, k, nakedSubsetPick, env)
         if step then return step end
     end
     return nil
@@ -478,60 +601,70 @@ end
 
 -- Hidden subset of size k: k digits in a unit confined to exactly k cells --
 -- those cells are spoken for, strike every *other* digit from them.
+local function hiddenSubsetPick(env, pick)
+    local ctx, st, k, cells, pos = env.ctx, env.st, env.k, env.cells, env.pos
+    local union, dmask = 0, 0
+    for i = 1, k do
+        union = bor(union, pos[pick[i]])
+        dmask = bor(dmask, lshift(1, pick[i] - 1))
+    end
+    if popcount(union) ~= k then return nil end
+    local elims, focus = {}, {}
+    local slots = union
+    while slots ~= 0 do
+        local slot = lowestDigit(band(slots, -slots))
+        local idx  = cells[slot]
+        local r, c = rc(ctx, idx)
+        focus[#focus + 1] = { r = r, c = c }
+        local extra = band(st.cand[idx], bnot(dmask))
+        for _, d in ipairs(digitsOf(extra)) do
+            elims[#elims + 1] = { r = r, c = c, digit = d }
+        end
+        slots = band(slots, slots - 1)
+    end
+    if #elims == 0 then return nil end
+    local digits = {}
+    for i = 1, k do digits[i] = pick[i] end
+    return {
+        technique    = env.technique,
+        tier         = env.tier,
+        unit_kind    = ctx.unit_kind[env.u],
+        digits       = digits,
+        eliminations = elims,
+        focus        = focus,
+    }
+end
+
 local function hiddenSubset(ctx, st, k, technique, tier)
+    local env = { ctx = ctx, st = st, k = k, technique = technique, tier = tier }
     for u = 1, #ctx.units do
         local cells = ctx.units[u]
-        local slot_of, pos = {}, {}
-        for i, idx in ipairs(cells) do slot_of[idx] = i end
-        local pool = {}
-        for d = 1, ctx.n do
-            local m, mask, placed = lshift(1, d - 1), 0, false
-            for i, idx in ipairs(cells) do
-                if st.value[idx] == d then
-                    placed = true
-                    break
-                elseif st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
-                    mask = bor(mask, lshift(1, i - 1))
+        -- pos[d]: the slots (bit i-1 = cells[i]) where d can still go, built
+        -- in one pass over the unit's cells.
+        local pos, placed = {}, 0
+        for d = 1, ctx.n do pos[d] = 0 end
+        for i, idx in ipairs(cells) do
+            local v = st.value[idx]
+            if v ~= 0 then
+                placed = bor(placed, lshift(1, v - 1))
+            else
+                local cm, slot = st.cand[idx], lshift(1, i - 1)
+                while cm ~= 0 do
+                    local d = LOW_DIGIT[band(cm, -cm)]
+                    pos[d] = bor(pos[d], slot)
+                    cm = band(cm, cm - 1)
                 end
-            end
-            local pc = popcount(mask)
-            if not placed and pc >= 2 and pc <= k then
-                pool[#pool + 1] = d
-                pos[d] = mask
             end
         end
-        local step = combinations(pool, k, function(pick)
-            local union, dmask = 0, 0
-            for i = 1, k do
-                union = bor(union, pos[pick[i]])
-                dmask = bor(dmask, lshift(1, pick[i] - 1))
+        local pool = {}
+        for d = 1, ctx.n do
+            local pc = popcount(pos[d])
+            if band(placed, lshift(1, d - 1)) == 0 and pc >= 2 and pc <= k then
+                pool[#pool + 1] = d
             end
-            if popcount(union) ~= k then return nil end
-            local elims, focus = {}, {}
-            local slots = union
-            while slots ~= 0 do
-                local slot = lowestDigit(band(slots, -slots))
-                local idx  = cells[slot]
-                local r, c = rc(ctx, idx)
-                focus[#focus + 1] = { r = r, c = c }
-                local extra = band(st.cand[idx], bnot(dmask))
-                for _, d in ipairs(digitsOf(extra)) do
-                    elims[#elims + 1] = { r = r, c = c, digit = d }
-                end
-                slots = band(slots, slots - 1)
-            end
-            if #elims == 0 then return nil end
-            local digits = {}
-            for i = 1, k do digits[i] = pick[i] end
-            return {
-                technique    = technique,
-                tier         = tier,
-                unit_kind    = ctx.unit_kind[u],
-                digits       = digits,
-                eliminations = elims,
-                focus        = focus,
-            }
-        end)
+        end
+        env.u, env.cells, env.pos = u, cells, pos
+        local step = combinations(pool, pos, k, hiddenSubsetPick, env)
         if step then return step end
     end
     return nil
@@ -541,70 +674,94 @@ end
 -- vice versa. Deliberately restricted to rows/cols: a "fish" over arbitrary
 -- extra regions is not a technique a human would recognise, and the point of
 -- the tiers is to describe human effort.
+local function fishPick(env, pick)
+    local ctx, st, k, pos, m, d = env.ctx, env.st, env.k, env.pos, env.m, env.d
+    local orient, base_units, cover_line = env.orient, env.base_units, env.cover_line
+    local union = 0
+    for i = 1, k do union = bor(union, pos[pick[i]]) end
+    if popcount(union) ~= k then return nil end
+    local in_base = {}
+    for i = 1, k do in_base[pick[i]] = true end
+    local elims, focus = {}, {}
+    for i = 1, k do
+        for _, idx in ipairs(ctx.units[base_units[pick[i]]]) do
+            if st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
+                local r, c = rc(ctx, idx)
+                focus[#focus + 1] = { r = r, c = c }
+            end
+        end
+    end
+    local covers = union
+    while covers ~= 0 do
+        local ci = lowestDigit(band(covers, -covers))
+        for _, idx in ipairs(ctx.units[cover_line[ci]]) do
+            local base_line = (orient == "row") and ctx.row_of[idx] or ctx.col_of[idx]
+            if not in_base[base_line] and st.value[idx] == 0
+               and band(st.cand[idx], m) ~= 0 then
+                local r, c = rc(ctx, idx)
+                elims[#elims + 1] = { r = r, c = c, digit = d }
+            end
+        end
+        covers = band(covers, covers - 1)
+    end
+    if #elims == 0 then return nil end
+    return {
+        technique    = env.technique,
+        tier         = env.tier,
+        digit        = d,
+        unit_kind    = orient,
+        eliminations = elims,
+        focus        = focus,
+    }
+end
+
+local FISH_ORIENTS = { "row", "col" }
+
 local function fish(ctx, st, k, technique, tier)
     local n = ctx.n
-    for _, orient in ipairs({ "row", "col" }) do
+    local env = { ctx = ctx, st = st, k = k, technique = technique, tier = tier }
+    for _, orient in ipairs(FISH_ORIENTS) do
         local base_units = (orient == "row") and ctx.rows or ctx.cols
         local cover_of   = (orient == "row") and ctx.col_of or ctx.row_of
         local cover_line = (orient == "row") and ctx.cols or ctx.rows
+        env.orient, env.base_units, env.cover_line = orient, base_units, cover_line
+        -- line_pos[(d - 1) * n + li]: the cover lines where d can still go in
+        -- base line li; line_placed[li]: the digits already placed in it. One
+        -- pass over the grid for all digits at once.
+        local line_pos, line_placed = {}, {}
+        for i = 1, n * n do line_pos[i] = 0 end
+        for li = 1, n do
+            local placed = 0
+            for _, idx in ipairs(ctx.units[base_units[li]]) do
+                local v = st.value[idx]
+                if v ~= 0 then
+                    placed = bor(placed, lshift(1, v - 1))
+                else
+                    local cm, cover = st.cand[idx], lshift(1, cover_of[idx] - 1)
+                    while cm ~= 0 do
+                        local slot = (LOW_DIGIT[band(cm, -cm)] - 1) * n + li
+                        line_pos[slot] = bor(line_pos[slot], cover)
+                        cm = band(cm, cm - 1)
+                    end
+                end
+            end
+            line_placed[li] = placed
+        end
         for d = 1, n do
             local m    = lshift(1, d - 1)
             local pool = {}
             local pos  = {}
+            local base = (d - 1) * n
             for li = 1, n do
-                local mask, placed = 0, false
-                for _, idx in ipairs(ctx.units[base_units[li]]) do
-                    if st.value[idx] == d then
-                        placed = true
-                        break
-                    elseif st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
-                        mask = bor(mask, lshift(1, cover_of[idx] - 1))
-                    end
-                end
+                local mask = line_pos[base + li]
                 local pc = popcount(mask)
-                if not placed and pc >= 2 and pc <= k then
+                if band(line_placed[li], m) == 0 and pc >= 2 and pc <= k then
                     pool[#pool + 1] = li
                     pos[li] = mask
                 end
             end
-            local step = combinations(pool, k, function(pick)
-                local union = 0
-                for i = 1, k do union = bor(union, pos[pick[i]]) end
-                if popcount(union) ~= k then return nil end
-                local in_base = {}
-                for i = 1, k do in_base[pick[i]] = true end
-                local elims, focus = {}, {}
-                for i = 1, k do
-                    for _, idx in ipairs(ctx.units[base_units[pick[i]]]) do
-                        if st.value[idx] == 0 and band(st.cand[idx], m) ~= 0 then
-                            local r, c = rc(ctx, idx)
-                            focus[#focus + 1] = { r = r, c = c }
-                        end
-                    end
-                end
-                local covers = union
-                while covers ~= 0 do
-                    local ci = lowestDigit(band(covers, -covers))
-                    for _, idx in ipairs(ctx.units[cover_line[ci]]) do
-                        local base_line = (orient == "row") and ctx.row_of[idx] or ctx.col_of[idx]
-                        if not in_base[base_line] and st.value[idx] == 0
-                           and band(st.cand[idx], m) ~= 0 then
-                            local r, c = rc(ctx, idx)
-                            elims[#elims + 1] = { r = r, c = c, digit = d }
-                        end
-                    end
-                    covers = band(covers, covers - 1)
-                end
-                if #elims == 0 then return nil end
-                return {
-                    technique    = technique,
-                    tier         = tier,
-                    digit        = d,
-                    unit_kind    = orient,
-                    eliminations = elims,
-                    focus        = focus,
-                }
-            end)
+            env.d, env.m, env.pos = d, m, pos
+            local step = combinations(pool, pos, k, fishPick, env)
             if step then return step end
         end
     end
@@ -621,14 +778,20 @@ local function xyWing(ctx, st)
             bi[#bi + 1] = idx
         end
     end
+    -- The two digits of each bivalue cell, low then high.
+    local lo, hi = {}, {}
+    for _, idx in ipairs(bi) do
+        local cm = st.cand[idx]
+        lo[idx] = lowestDigit(cm)
+        hi[idx] = lowestDigit(band(cm, cm - 1))
+    end
     for _, pivot in ipairs(bi) do
-        local pd = digitsOf(st.cand[pivot])
-        local x, y = pd[1], pd[2]
+        local x, y = lo[pivot], hi[pivot]
         for _, a in ipairs(bi) do
             if a ~= pivot and ctx.peer_set[pivot][a] then
-                local ad = digitsOf(st.cand[a])
+                local a1, a2 = lo[a], hi[a]
                 local z
-                if ad[1] == x then z = ad[2] elseif ad[2] == x then z = ad[1] end
+                if a1 == x then z = a2 elseif a2 == x then z = a1 end
                 if z and z ~= y then
                     local zmask = lshift(1, z - 1)
                     local want  = bor(lshift(1, y - 1), zmask)
@@ -951,6 +1114,7 @@ function M.solve(grid, n, box_rows, box_cols, extra_regions, opts)
                  contradiction = true, steps = opts.trace and {} or nil }
     end
     st.cages = opts.cages
+    st.lean  = not opts.trace
 
     local counts, steps, best = {}, opts.trace and {} or nil, 0
     while st.unsolved > 0 and not st.broken do

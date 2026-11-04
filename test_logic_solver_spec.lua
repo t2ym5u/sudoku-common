@@ -438,3 +438,107 @@ describe("killer cages", function()
     end)
 end)
 
+
+-- sudoku-common 1.6.0 made the solver and the extra-region fill faster. The
+-- solver change must not alter a single deduction (a seed gives the same
+-- puzzle everywhere -- the Daily Challenge relies on it), so these are the
+-- checksums the 1.5.0 code produced for seeded generation. Park-Miller keeps
+-- the random stream exact both in LuaJIT doubles and in Lua 5.4+ integers.
+describe("speed-ups keep the puzzles", function()
+    local function parkMiller(seed)
+        local s = seed
+        return function(i)
+            s = (s * 16807) % 2147483647
+            return s % i + 1
+        end
+    end
+    local function checksum(g, n, acc)
+        for r = 1, n do
+            for c = 1, n do acc = (acc * 31 + g[r][c]) % 1000000007 end
+        end
+        return acc
+    end
+
+    local SEEDED = {
+        { 9, 3, 3, "easy",    352894876 },
+        { 9, 3, 3, "medium",  885444799 },
+        { 9, 3, 3, "hard",    479021984 },
+        { 9, 3, 3, "expert",  722235249 },
+        { 6, 2, 3, "expert",  344755407 },
+        { 12, 3, 4, "hard",   969110237 },
+    }
+    for _, cf in ipairs(SEEDED) do
+        local n, br, bc, diff, want = cf[1], cf[2], cf[3], cf[4], cf[5]
+        it(("%dx%d %s: same grids and puzzles as 1.5.0 for the same seeds"):format(n, n, diff), function()
+            local acc = 0
+            for seed = 1, 5 do
+                local randInt = parkMiller(seed * 1000 + 7)
+                local sol = PG.generateSolvedBoard(n, br, bc, nil, randInt)
+                local puz = PG.createPuzzle(sol, diff, n, br, bc, nil, randInt)
+                acc = checksum(puz, n, checksum(sol, n, acc))
+            end
+            assert.are.equal(want, acc)
+        end)
+    end
+
+    -- The extra-region fill itself did change (it is what got faster), so
+    -- dig a fixed windoku grid instead.
+    local WINDOKU_GRID = {
+        {8,4,6,1,7,2,3,9,5}, {2,3,1,5,8,9,7,4,6}, {5,9,7,4,3,6,2,8,1},
+        {7,6,8,2,4,1,5,3,9}, {1,2,3,8,9,5,6,7,4}, {9,5,4,7,6,3,1,2,8},
+        {4,1,2,3,5,8,9,6,7}, {3,8,9,6,1,7,4,5,2}, {6,7,5,9,2,4,8,1,3},
+    }
+    local WINDOWS = {}
+    for _, tl in ipairs({ {2,2}, {2,6}, {6,2}, {6,6} }) do
+        local cells = {}
+        for r = tl[1], tl[1] + 2 do
+            for c = tl[2], tl[2] + 2 do cells[#cells + 1] = { r = r, c = c } end
+        end
+        WINDOWS[#WINDOWS + 1] = cells
+    end
+    for _, cf in ipairs({ { "easy", 23139837 }, { "expert", 796808709 } }) do
+        it("windoku " .. cf[1] .. ": same puzzles as 1.5.0 from the same grid", function()
+            local acc = 0
+            for seed = 1, 5 do
+                local puz = PG.createPuzzle(WINDOKU_GRID, cf[1], 9, 3, 3, WINDOWS, parkMiller(seed))
+                acc = checksum(puz, 9, acc)
+            end
+            assert.are.equal(cf[2], acc)
+        end)
+    end
+
+    it("fills windoku and sudokux grids that respect every region, the same for the same seed", function()
+        local diag1, diag2 = {}, {}
+        for i = 1, 9 do diag1[i] = { r = i, c = i }; diag2[i] = { r = i, c = 10 - i } end
+        for _, regions in ipairs({ WINDOWS, { diag1, diag2 } }) do
+            for seed = 1, 40 do
+                local g  = PG.generateSolvedBoard(9, 3, 3, regions, parkMiller(seed))
+                local g2 = PG.generateSolvedBoard(9, 3, 3, regions, parkMiller(seed))
+                assert.are.same(g, g2)
+                local units = {}
+                for i = 1, 9 do
+                    local row, col, box = {}, {}, {}
+                    local br, bc = math.floor((i - 1) / 3) * 3, ((i - 1) % 3) * 3
+                    for j = 1, 9 do
+                        row[j] = g[i][j]
+                        col[j] = g[j][i]
+                        box[j] = g[br + math.floor((j - 1) / 3) + 1][bc + (j - 1) % 3 + 1]
+                    end
+                    units[#units + 1] = row; units[#units + 1] = col; units[#units + 1] = box
+                end
+                for _, region in ipairs(regions) do
+                    local u = {}
+                    for _, cell in ipairs(region) do u[#u + 1] = g[cell.r][cell.c] end
+                    units[#units + 1] = u
+                end
+                for _, u in ipairs(units) do
+                    local seen = {}
+                    for _, v in ipairs(u) do
+                        assert.is_true(v >= 1 and v <= 9 and not seen[v])
+                        seen[v] = true
+                    end
+                end
+            end
+        end
+    end)
+end)

@@ -29,9 +29,10 @@ end
 --
 -- extra_regions is an optional list of cell-lists, e.g.
 -- { { {r=1,c=1}, {r=2,c=2}, ... }, ... }, each of which must also contain no
--- duplicate digit. The fast bitset engine below only tracks row/col/box
--- constraints, so any call that supplies extra_regions falls back to the
--- naive per-cell backtracking path in this section instead.
+-- duplicate digit. The fast Latin-square construction below only knows
+-- row/col/box constraints, so any call that supplies extra_regions fills its
+-- grid by backtracking search in this section instead (and countSolutions
+-- takes the naive per-cell path).
 -- ---------------------------------------------------------------------------
 
 local function buildCellRegionMap(extra_regions)
@@ -77,23 +78,152 @@ local function isValidPlacement(grid, row, col, value, n, box_rows, box_cols, ce
     return true
 end
 
-local function fillBoard(grid, cell, n, box_rows, box_cols, cell_region_map, randInt)
-    if cell > n * n then
-        return true
-    end
-    local row = math.floor((cell - 1) / n) + 1
-    local col = (cell - 1) % n + 1
-    local numbers = shuffledDigits(n, randInt)
-    for _, value in ipairs(numbers) do
-        if isValidPlacement(grid, row, col, value, n, box_rows, box_cols, cell_region_map) then
-            grid[row][col] = value
-            if fillBoard(grid, cell + 1, n, box_rows, box_cols, cell_region_map, randInt) then
-                return true
-            end
-            grid[row][col] = 0
+-- Fills an empty grid with a solution that also satisfies extra_regions.
+--
+-- Bitmask backtracking that branches on the most constrained choice -- a
+-- digit with one place left in some unit, else the open cell with the fewest
+-- digits left (first in reading order on a tie) -- trying digits in a fresh
+-- random order at each branch. Filling cells strictly in reading order, as
+-- this used to, regularly painted itself into a corner deep in the grid and
+-- backtracked through thousands of placements before noticing: on windoku
+-- that was 80% of generating a puzzle, up to 0.4 s on a desktop and ten
+-- times that on an e-reader. This notices a dead end as soon as a cell runs
+-- out of digits or a unit out of room for one.
+--
+-- A fill that still wanders past FILL_NODE_LIMIT placements is abandoned
+-- and restarted (a node count, not a time limit, so a given randInt still
+-- produces the same grid on every device).
+local FILL_NODE_LIMIT   = 300
+local FILL_MAX_RESTARTS = 20
+
+local function fillBoardOnce(grid, n, box_rows, box_cols, cell_region_list, randInt, node_limit)
+    local num_stacks = n / box_cols
+    local full_mask  = lshift(1, n) - 1
+    local total      = n * n
+
+    -- Unit masks: rows 1..n, cols n+1..2n, boxes 2n+1..3n, regions after.
+    local used, unit_cells = {}, {}
+    local cell_units = {}
+    local num_units = 3 * n + #(cell_region_list.regions)
+    for u = 1, num_units do used[u] = 0; unit_cells[u] = {} end
+    for idx = 1, total do
+        local r = math.floor((idx - 1) / n) + 1
+        local c = (idx - 1) % n + 1
+        local b = math.floor((r - 1) / box_rows) * num_stacks + math.floor((c - 1) / box_cols) + 1
+        local list = { r, n + c, 2 * n + b }
+        local extra = cell_region_list.of[idx]
+        if extra then
+            for _, ri in ipairs(extra) do list[#list + 1] = 3 * n + ri end
+        end
+        cell_units[idx] = list
+        for _, u in ipairs(list) do
+            local uc = unit_cells[u]
+            uc[#uc + 1] = idx
         end
     end
-    return false
+
+    local value, free = {}, {}
+    for idx = 1, total do value[idx] = 0 end
+    local nodes = 0
+
+    local function search(remaining)
+        if remaining == 0 then return true end
+        nodes = nodes + 1
+        if nodes > node_limit then return false end
+
+        local best, best_cnt = nil, n + 1
+        for idx = 1, total do
+            if value[idx] == 0 then
+                local m = 0
+                for _, u in ipairs(cell_units[idx]) do m = bor(m, used[u]) end
+                local f = band(bnot(m), full_mask)
+                free[idx] = f
+                local cnt, x = 0, f
+                while x ~= 0 do x = band(x, x - 1); cnt = cnt + 1 end
+                if cnt == 0 then return false end
+                if cnt < best_cnt then best, best_cnt = idx, cnt end
+            end
+        end
+        local best_free = free[best]
+        -- Every unit must still have room for each of its missing digits; and
+        -- a digit with a single place left in a unit is as forced as a cell
+        -- with a single digit left, so branch on it the same way.
+        for u = 1, num_units do
+            local m = used[u]
+            if m ~= full_mask then
+                local once, twice = m, m
+                for _, idx in ipairs(unit_cells[u]) do
+                    if value[idx] == 0 then
+                        local f = free[idx]
+                        twice = bor(twice, band(once, f))
+                        once  = bor(once, f)
+                    end
+                end
+                if once ~= full_mask then return false end
+                if best_cnt > 1 and twice ~= full_mask then
+                    local d = band(bnot(twice), full_mask)
+                    d = band(d, -d)
+                    for _, idx in ipairs(unit_cells[u]) do
+                        if value[idx] == 0 and band(free[idx], d) ~= 0 then
+                            best, best_free, best_cnt = idx, d, 1
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if best_cnt == 0 then return false end
+
+        -- The candidate digits, shuffled.
+        local cand, k = {}, 0
+        for d = 1, n do
+            if band(best_free, lshift(1, d - 1)) ~= 0 then k = k + 1; cand[k] = d end
+        end
+        for i = k, 2, -1 do
+            local j = randInt(i)
+            cand[i], cand[j] = cand[j], cand[i]
+        end
+
+        local units = cell_units[best]
+        for i = 1, k do
+            local d = cand[i]
+            local m = lshift(1, d - 1)
+            value[best] = d
+            for _, u in ipairs(units) do used[u] = bor(used[u], m) end
+            if search(remaining - 1) then return true end
+            for _, u in ipairs(units) do used[u] = band(used[u], bnot(m)) end
+            value[best] = 0
+            if nodes > node_limit then return false end
+        end
+        return false
+    end
+
+    if not search(total) then return false end
+    for idx = 1, total do
+        grid[math.floor((idx - 1) / n) + 1][(idx - 1) % n + 1] = value[idx]
+    end
+    return true
+end
+
+local function fillBoard(grid, n, box_rows, box_cols, extra_regions, randInt)
+    randInt = randInt or math.random
+    -- extra_regions as unit numbers per cell index.
+    local list = { regions = extra_regions, of = {} }
+    for ri, region in ipairs(extra_regions) do
+        for _, cell in ipairs(region) do
+            local idx = (cell.r - 1) * n + cell.c
+            list.of[idx] = list.of[idx] or {}
+            table.insert(list.of[idx], ri)
+        end
+    end
+    for _ = 1, FILL_MAX_RESTARTS do
+        if fillBoardOnce(grid, n, box_rows, box_cols, list, randInt, FILL_NODE_LIMIT) then
+            return true
+        end
+    end
+    -- Regions that make every fill this hard (none of the shipped variants):
+    -- search to the end rather than loop forever.
+    return fillBoardOnce(grid, n, box_rows, box_cols, list, randInt, math.huge)
 end
 
 local function countSolutionsSlow(grid, limit, n, box_rows, box_cols, cell_region_map)
@@ -301,15 +431,13 @@ end
 -- ---------------------------------------------------------------------------
 
 -- extra_regions (optional): see the section above -- routes generation
--- through the slower per-cell backtracking path instead of the fast bitset
--- Latin-square construction, since the latter can't guarantee arbitrary
--- extra regions.
+-- through the backtracking fill (fillBoard) instead of the fast Latin-square
+-- construction, since the latter can't guarantee arbitrary extra regions.
 -- randInt(i) -> [1,i] (optional): see shuffledDigits' doc comment above.
 local function generateSolvedBoard(n, box_rows, box_cols, extra_regions, randInt)
     if extra_regions then
         local grid = emptyGrid(n)
-        local cell_region_map = buildCellRegionMap(extra_regions)
-        fillBoard(grid, 1, n, box_rows, box_cols, cell_region_map, randInt)
+        fillBoard(grid, n, box_rows, box_cols, extra_regions, randInt)
         return grid
     end
     return generateSolvedBoardFast(n, box_rows, box_cols, randInt)
