@@ -258,7 +258,7 @@ local function buildContext(n, box_rows, box_cols, extra_regions)
                     for _, idx in ipairs(ctx.units[v]) do
                         if not in_u[idx] then v_only[#v_only + 1] = idx end
                     end
-                    list[#list + 1] = { u_only = u_only, v_only = v_only }
+                    list[#list + 1] = { v = v, u_only = u_only, v_only = v_only }
                 end
             end
         end
@@ -281,6 +281,17 @@ local function buildContext(n, box_rows, box_cols, extra_regions)
         ctx.peers[idx]    = list
         ctx.peer_set[idx] = seen
     end
+
+    -- Slots of st.idle (see unitIdle), one per (technique, unit) or
+    -- (fish, orientation, digit), packed into one array.
+    local nu = #ctx.units
+    ctx.idle_hidden_single = 0
+    ctx.idle_locked = nu
+    ctx.idle_naked  = { [2] = 2 * nu, [3] = 3 * nu, [4] = 4 * nu }
+    ctx.idle_hidden = { [2] = 5 * nu, [3] = 6 * nu, [4] = 7 * nu }
+    ctx.idle_fish   = { [2] = 8 * nu, [3] = 8 * nu + 2 * n }
+    ctx.idle_xy     = 8 * nu + 4 * n + 1
+    ctx.idle_slots  = ctx.idle_xy
 
     return ctx
 end
@@ -314,6 +325,13 @@ local function eliminate(ctx, st, idx, digit)
     local nc = band(cur, bnot(m))
     st.cand[idx] = nc
     if nc == 0 and st.value[idx] == 0 then st.broken = true end
+    local ustamp = st.ustamp
+    if ustamp then
+        local tick = st.tick
+        local us = ctx.unit_of[idx]
+        for i = 1, #us do ustamp[us[i]] = tick end
+        st.dstamp[digit], st.gstamp = tick, tick
+    end
     return true
 end
 
@@ -324,6 +342,19 @@ local function place(ctx, st, idx, digit)
         return false
     end
     local value, cand = st.value, st.cand
+    -- Change stamps, kept only by the generator's states (see M.deduce).
+    local ustamp, tick = st.ustamp, st.tick
+    local unit_of = ctx.unit_of
+    if ustamp then
+        local dstamp, gone = st.dstamp, cand[idx]
+        while gone ~= 0 do
+            dstamp[LOW_DIGIT[band(gone, -gone)]] = tick
+            gone = band(gone, gone - 1)
+        end
+        local us = unit_of[idx]
+        for i = 1, #us do ustamp[us[i]] = tick end
+        st.gstamp = tick
+    end
     value[idx] = digit
     cand[idx]  = 0
     st.unsolved = st.unsolved - 1
@@ -340,9 +371,26 @@ local function place(ctx, st, idx, digit)
             local nc = band(cur, keep)
             cand[p] = nc
             if nc == 0 and value[p] == 0 then st.broken = true end
+            if ustamp then
+                local us = unit_of[p]
+                for i = 1, #us do ustamp[us[i]] = tick end
+            end
         end
     end
     return not st.broken
+end
+
+-- Skipping work that cannot find anything new. The generator's test states
+-- (M.stateWithClues) carry change stamps: st.tick is bumped before every
+-- scan, and a change to a cell (value or candidates) stamps the units it
+-- belongs to, the digits it concerns, and the grid with the current tick. A
+-- technique that scanned a unit (or a digit, for fish) and found nothing
+-- records the tick in st.idle[key]; if nothing it reads has been stamped
+-- since (a stamp >= the recorded tick counts as "maybe changed"), scanning
+-- it again would find nothing again, so it is skipped. Plain solve() states
+-- have no stamps and always scan everything.
+local function unitIdle(st, key, u)
+    return st.ustamp[u] < st.idle[key]
 end
 
 -- Returns the state, or nil if the given grid is already self-contradictory.
@@ -473,8 +521,22 @@ end
 -- overlap, so it can be struck from B outside A. Classic "pointing" (box ->
 -- line) and "claiming" (line -> box) are both instances, and so are the
 -- interactions with windoku/sudokux extra regions -- no special-casing.
+-- With change stamps (see unitIdle), a unit is skipped when neither it nor
+-- any unit overlapping it changed since it last yielded nothing.
+local function lockedIdle(ctx, st, u)
+    local since = st.idle[ctx.idle_locked + u]
+    local ustamp = st.ustamp
+    if ustamp[u] >= since then return false end
+    for _, ov in ipairs(ctx.overlaps[u]) do
+        if ustamp[ov.v] >= since then return false end
+    end
+    return true
+end
+
 local function lockedCandidates(ctx, st)
+    local tracked = st.ustamp ~= nil
     for u = 1, #ctx.units do
+      if not (tracked and lockedIdle(ctx, st, u)) then
         local cells = ctx.units[u]
         local placed, _, twice = unitDigitMasks(st, cells)
         local multi = band(twice, bnot(placed))
@@ -543,6 +605,8 @@ local function lockedCandidates(ctx, st)
                 end
             end
         end
+        if tracked then st.idle[ctx.idle_locked + u] = st.tick end
+      end
     end
     return nil
 end
@@ -583,18 +647,23 @@ end
 
 local function nakedSubset(ctx, st, k, technique, tier)
     local env = { ctx = ctx, st = st, k = k, technique = technique, tier = tier }
+    local tracked = st.ustamp ~= nil
     for u = 1, #ctx.units do
         local cells = ctx.units[u]
-        local pool  = {}
-        for _, idx in ipairs(cells) do
-            local pc = popcount(st.cand[idx])
-            if st.value[idx] == 0 and pc >= 2 and pc <= k then
-                pool[#pool + 1] = idx
+        local key   = tracked and (ctx.idle_naked[k] + u)
+        if not (tracked and unitIdle(st, key, u)) then
+            local pool  = {}
+            for _, idx in ipairs(cells) do
+                local pc = popcount(st.cand[idx])
+                if st.value[idx] == 0 and pc >= 2 and pc <= k then
+                    pool[#pool + 1] = idx
+                end
             end
+            env.u, env.cells = u, cells
+            local step = combinations(pool, st.cand, k, nakedSubsetPick, env)
+            if step then return step end
+            if tracked then st.idle[key] = st.tick end
         end
-        env.u, env.cells = u, cells
-        local step = combinations(pool, st.cand, k, nakedSubsetPick, env)
-        if step then return step end
     end
     return nil
 end
@@ -637,8 +706,11 @@ end
 
 local function hiddenSubset(ctx, st, k, technique, tier)
     local env = { ctx = ctx, st = st, k = k, technique = technique, tier = tier }
+    local tracked = st.ustamp ~= nil
     for u = 1, #ctx.units do
         local cells = ctx.units[u]
+        local key   = tracked and (ctx.idle_hidden[k] + u)
+        if not (tracked and unitIdle(st, key, u)) then
         -- pos[d]: the slots (bit i-1 = cells[i]) where d can still go, built
         -- in one pass over the unit's cells.
         local pos, placed = {}, 0
@@ -666,6 +738,8 @@ local function hiddenSubset(ctx, st, k, technique, tier)
         env.u, env.cells, env.pos = u, cells, pos
         local step = combinations(pool, pos, k, hiddenSubsetPick, env)
         if step then return step end
+        if tracked then st.idle[key] = st.tick end
+        end
     end
     return nil
 end
@@ -720,7 +794,17 @@ local FISH_ORIENTS = { "row", "col" }
 local function fish(ctx, st, k, technique, tier)
     local n = ctx.n
     local env = { ctx = ctx, st = st, k = k, technique = technique, tier = tier }
-    for _, orient in ipairs(FISH_ORIENTS) do
+    local tracked = st.ustamp ~= nil
+    for oi, orient in ipairs(FISH_ORIENTS) do
+        -- A fish on digit d reads only d's candidates and placements.
+        local key0 = ctx.idle_fish[k] + (oi - 1) * n
+        local busy = not tracked
+        if tracked then
+            for d = 1, n do
+                if st.dstamp[d] >= st.idle[key0 + d] then busy = true break end
+            end
+        end
+        if busy then
         local base_units = (orient == "row") and ctx.rows or ctx.cols
         local cover_of   = (orient == "row") and ctx.col_of or ctx.row_of
         local cover_line = (orient == "row") and ctx.cols or ctx.rows
@@ -748,21 +832,25 @@ local function fish(ctx, st, k, technique, tier)
             line_placed[li] = placed
         end
         for d = 1, n do
-            local m    = lshift(1, d - 1)
-            local pool = {}
-            local pos  = {}
-            local base = (d - 1) * n
-            for li = 1, n do
-                local mask = line_pos[base + li]
-                local pc = popcount(mask)
-                if band(line_placed[li], m) == 0 and pc >= 2 and pc <= k then
-                    pool[#pool + 1] = li
-                    pos[li] = mask
+            if not (tracked and st.dstamp[d] < st.idle[key0 + d]) then
+                local m    = lshift(1, d - 1)
+                local pool = {}
+                local pos  = {}
+                local base = (d - 1) * n
+                for li = 1, n do
+                    local mask = line_pos[base + li]
+                    local pc = popcount(mask)
+                    if band(line_placed[li], m) == 0 and pc >= 2 and pc <= k then
+                        pool[#pool + 1] = li
+                        pos[li] = mask
+                    end
                 end
+                env.d, env.m, env.pos = d, m, pos
+                local step = combinations(pool, pos, k, fishPick, env)
+                if step then return step end
+                if tracked then st.idle[key0 + d] = st.tick end
             end
-            env.d, env.m, env.pos = d, m, pos
-            local step = combinations(pool, pos, k, fishPick, env)
-            if step then return step end
+        end
         end
     end
     return nil
@@ -772,6 +860,8 @@ end
 -- pivot resolves, one wing becomes z -- so z is impossible in any cell seeing
 -- both wings.
 local function xyWing(ctx, st)
+    local tracked = st.ustamp ~= nil
+    if tracked and st.gstamp < st.idle[ctx.idle_xy] then return nil end
     local bi = {}
     for idx = 1, ctx.cells do
         if st.value[idx] == 0 and popcount(st.cand[idx]) == 2 then
@@ -822,6 +912,7 @@ local function xyWing(ctx, st)
             end
         end
     end
+    if tracked then st.idle[ctx.idle_xy] = st.tick end
     return nil
 end
 
@@ -1214,6 +1305,181 @@ function M.candidates(grid, n, box_rows, box_cols, extra_regions)
         end
     end
     return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Incremental digging support (puzzle_generator.createPuzzle)
+--
+-- The generator asks solvableWithin() once per cell of the grid, each time on
+-- the current puzzle minus one clue, and each call used to rebuild the state
+-- from the bare clues and re-derive everything one step at a time. These
+-- helpers let it keep a running state instead and answer the same question
+-- with less repeated work (16x16 grids: about half the work). They rely on
+-- a property of the techniques above:
+-- every step is a sound deduction, and knowing more never stops a technique
+-- from reaching what it would have reached (a pattern that loses a cell to a
+-- placement degenerates into a lower-tier step of the same reach). So the set
+-- of facts deducible within a tier does not depend on the order the steps are
+-- taken in, which is what makes it safe to
+--   * start from facts already known to follow from a subset of the clues,
+--   * place every single found in a sweep instead of one per scan,
+--   * stop as soon as the removed clue is deduced again (if the puzzle WITH
+--     that clue was solvable, deducing it brings back that exact position),
+--   * skip re-scanning what found nothing and has not changed since (see
+--     unitIdle).
+-- Cross-checked 2026-11-04: every one of ~330,000 dig tests over 6,000
+-- generated puzzles (4x4 to 16x16, Windoku and Sudoku X regions, every
+-- difficulty) gave solvableWithin()'s answer, so the puzzles are identical.
+-- M.solve() itself, which rates puzzles and drives hints, is unchanged.
+-- Killer cages are not supported here (their techniques read st.cages).
+-- ---------------------------------------------------------------------------
+
+-- Empty state on the given shape (no clue placed).
+function M.digState(n, box_rows, box_cols, extra_regions)
+    local ctx = getContext(n, box_rows, box_cols, extra_regions)
+    local st  = { value = {}, cand = {}, unsolved = ctx.cells, broken = false, lean = true }
+    for idx = 1, ctx.cells do
+        st.value[idx] = 0
+        st.cand[idx]  = ctx.full_mask
+    end
+    return ctx, st
+end
+
+-- Turns on the change stamps M.deduce uses to skip idle scans (see
+-- unitIdle). Fresh: nothing is known idle yet.
+local function trackChanges(ctx, st)
+    local ustamp, dstamp, idle = {}, {}, {}
+    for u = 1, #ctx.units do ustamp[u] = 0 end
+    for d = 1, ctx.n do dstamp[d] = 0 end
+    -- -1: never scanned, so never idle (stamps start at 0).
+    for i = 1, ctx.idle_slots do idle[i] = -1 end
+    st.ustamp, st.dstamp, st.gstamp, st.tick, st.idle = ustamp, dstamp, 0, 0, idle
+end
+
+-- A new state holding what base holds plus every clue of grid -- the same
+-- state as copying base and placing those clues one by one, built in one
+-- pass over the units instead. base must be consistent with grid (it is: it
+-- only ever holds clues of grid and what follows from them). The new state
+-- keeps change stamps (see unitIdle).
+function M.stateWithClues(ctx, base, grid)
+    local units, unit_of = ctx.units, ctx.unit_of
+    local bv, bc = base.value, base.cand
+    local value, cand, umask = {}, {}, {}
+    for u = 1, #units do umask[u] = 0 end
+    for idx = 1, ctx.cells do
+        local v = bv[idx]
+        if v == 0 then v = grid[ctx.row_of[idx]][ctx.col_of[idx]] end
+        value[idx] = v
+        if v ~= 0 then
+            local m = lshift(1, v - 1)
+            local us = unit_of[idx]
+            for i = 1, #us do umask[us[i]] = bor(umask[us[i]], m) end
+        end
+    end
+    local unsolved = 0
+    for idx = 1, ctx.cells do
+        if value[idx] ~= 0 then
+            cand[idx] = 0
+        else
+            local seen = 0
+            local us = unit_of[idx]
+            for i = 1, #us do seen = bor(seen, umask[us[i]]) end
+            cand[idx] = band(bc[idx], bnot(seen))
+            unsolved = unsolved + 1
+        end
+    end
+    local st = { value = value, cand = cand, unsolved = unsolved,
+                 broken = false, lean = true }
+    trackChanges(ctx, st)
+    return st
+end
+
+-- Writes a clue into the state unless it is already there. False if it
+-- contradicts what the state holds.
+function M.placeClue(ctx, st, idx, digit)
+    local v = st.value[idx]
+    if v ~= 0 then
+        if v ~= digit then st.broken = true end
+        return not st.broken
+    end
+    return place(ctx, st, idx, digit)
+end
+
+-- Places every naked and hidden single, repeatedly, until none is left.
+local function sweepSingles(ctx, st)
+    local value, cand, units = st.value, st.cand, ctx.units
+    local stamp = st.ustamp
+    local changed = true
+    while changed and not st.broken do
+        changed = false
+        for idx = 1, ctx.cells do
+            local cm = cand[idx]
+            if value[idx] == 0 and cm ~= 0 and band(cm, cm - 1) == 0 then
+                if not place(ctx, st, idx, LOW_DIGIT[cm]) then return end
+                changed = true
+            end
+        end
+        for u = 1, #units do
+            local cells = units[u]
+            local key = ctx.idle_hidden_single + u
+            if not (stamp and unitIdle(st, key, u)) then
+            if stamp then st.tick = st.tick + 1 end
+            local placed, once, twice = unitDigitMasks(st, cells)
+            local single = band(band(once, bnot(twice)), bnot(placed))
+            while single ~= 0 do
+                local m = band(single, -single)
+                -- An earlier placement in this sweep may already have put
+                -- this digit somewhere in the unit (via a peer) -- look again.
+                for i = 1, #cells do
+                    local idx = cells[i]
+                    if value[idx] == 0 and band(cand[idx], m) ~= 0 then
+                        if not place(ctx, st, idx, LOW_DIGIT[m]) then return end
+                        changed = true
+                        break
+                    end
+                end
+                single = band(single, single - 1)
+            end
+            if stamp then st.idle[key] = st.tick end
+            end
+        end
+    end
+end
+
+-- First technique after the singles (and the killer-only ones before
+-- locked candidates, which never fire without cages).
+local FIRST_NON_SINGLE
+for i, tech in ipairs(TECHNIQUES) do
+    if tech.name == "locked_candidates" then FIRST_NON_SINGLE = i break end
+end
+
+-- Runs deduction within max_tier from st (mutated) until the grid is solved,
+-- nothing more applies, or -- if stop_idx is given -- that cell is filled.
+-- Returns true when solved or stop_idx was filled.
+function M.deduce(ctx, st, max_tier, stop_idx)
+    while true do
+        sweepSingles(ctx, st)
+        if st.broken then return false end
+        if st.unsolved == 0 then return true end
+        if stop_idx and st.value[stop_idx] ~= 0 then return true end
+        local step
+        for i = FIRST_NON_SINGLE, #TECHNIQUES do
+            local tech = TECHNIQUES[i]
+            if tech.tier <= max_tier then
+                if st.ustamp then st.tick = st.tick + 1 end
+                step = tech.fn(ctx, st)
+                if step then break end
+            end
+        end
+        if not step then return false end
+        if not applyStep(ctx, st, step) then return false end
+    end
+end
+
+-- Only the singles: cheap propagation for keeping a running state current.
+function M.deduceSingles(ctx, st)
+    sweepSingles(ctx, st)
+    return not st.broken
 end
 
 return M

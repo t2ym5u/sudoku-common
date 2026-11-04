@@ -541,4 +541,107 @@ describe("speed-ups keep the puzzles", function()
             end
         end
     end)
+
+    -- createPuzzle answers "is the puzzle still deducible without this
+    -- clue?" incrementally (logic_solver's "Incremental digging support").
+    -- The reference below is the straightforward loop it replaced -- one full
+    -- solvableWithin() per cell -- and both must dig exactly the same puzzle.
+    describe("incremental digging", function()
+        local RATIOS = { easy = 0.43, medium = 0.56, hard = 0.65 }
+
+        local function referenceDig(solution, difficulty, n, br, bc, regions, randInt)
+            local puzzle = {}
+            for r = 1, n do
+                puzzle[r] = {}
+                for c = 1, n do puzzle[r][c] = solution[r][c] end
+            end
+            local tier = LS.DIFFICULTY_TIER[difficulty]
+            local removals = RATIOS[difficulty] and math.floor(n * n * RATIOS[difficulty]) or n * n
+            local cells = {}
+            for r = 1, n do for c = 1, n do cells[#cells + 1] = { r = r, c = c } end end
+            for i = #cells, 2, -1 do
+                local j = randInt(i)
+                cells[i], cells[j] = cells[j], cells[i]
+            end
+            local removed = 0
+            for _, cell in ipairs(cells) do
+                if removed >= removals then break end
+                local backup = puzzle[cell.r][cell.c]
+                puzzle[cell.r][cell.c] = 0
+                if LS.solvableWithin(puzzle, n, br, bc, regions, tier) then
+                    removed = removed + 1
+                else
+                    puzzle[cell.r][cell.c] = backup
+                end
+            end
+            return puzzle
+        end
+
+        local WINDOWS = {}
+        for _, rs in ipairs({ 2, 6 }) do
+            for _, cs in ipairs({ 2, 6 }) do
+                local cells = {}
+                for r = rs, rs + 2 do for c = cs, cs + 2 do cells[#cells + 1] = { r = r, c = c } end end
+                WINDOWS[#WINDOWS + 1] = cells
+            end
+        end
+
+        local CASES = {
+            { 6, 2, 3, nil, "6x6" }, { 9, 3, 3, nil, "9x9" },
+            { 9, 3, 3, WINDOWS, "9x9 windows" }, { 12, 3, 4, nil, "12x12" },
+        }
+        for _, case in ipairs(CASES) do
+            local n, br, bc, regions, label = case[1], case[2], case[3], case[4], case[5]
+            for _, diff in ipairs({ "easy", "medium", "hard", "expert" }) do
+                it("digs the same " .. label .. " " .. diff .. " puzzles as one full solve per clue", function()
+                    for seed = 1, (n == 12) and 1 or 3 do
+                        local solution = PG.generateSolvedBoard(n, br, bc, regions, seededRandInt(seed))
+                        local got  = PG.createPuzzle(solution, diff, n, br, bc, regions, seededRandInt(seed * 7 + 1))
+                        local want = referenceDig(solution, diff, n, br, bc, regions, seededRandInt(seed * 7 + 1))
+                        assert.are.same(want, got)
+                    end
+                end)
+            end
+        end
+
+        it("gives solvableWithin()'s answer on every single dig test", function()
+            local deduce, withClues = LS.deduce, LS.stateWithClues
+            local live, tests, mismatches = nil, 0, 0
+            LS.stateWithClues = function(ctx, base, grid)
+                live = grid
+                return withClues(ctx, base, grid)
+            end
+            LS.deduce = function(ctx, st, tier, stop)
+                local ok = deduce(ctx, st, tier, stop)
+                if stop then
+                    tests = tests + 1
+                    if ok ~= LS.solvableWithin(live, ctx.n, ctx.box_rows, ctx.box_cols, nil, tier) then
+                        mismatches = mismatches + 1
+                    end
+                end
+                return ok
+            end
+            local ok, err = pcall(function()
+                for seed = 1, 4 do
+                    for _, diff in ipairs({ "medium", "expert" }) do
+                        local solution = PG.generateSolvedBoard(9, 3, 3, nil, seededRandInt(seed + 50))
+                        PG.createPuzzle(solution, diff, 9, 3, 3, nil, seededRandInt(seed + 90))
+                    end
+                end
+            end)
+            LS.deduce, LS.stateWithClues = deduce, withClues
+            assert.is_true(ok, err)
+            assert.is_true(tests > 100)
+            assert.are.equal(0, mismatches)
+        end)
+
+        it("digs a 16x16 expert grid in reasonable time", function()
+            -- Generous: about 0.1 s under LuaJIT on a desktop, a few seconds
+            -- for plain Lua. Before the incremental dig it was twice that.
+            local t0 = os.clock()
+            local solution = PG.generateSolvedBoard(16, 4, 4, nil, seededRandInt(3))
+            PG.createPuzzle(solution, "expert", 16, 4, 4, nil, seededRandInt(4))
+            assert.is_true(os.clock() - t0 < 30)
+        end)
+    end)
 end)

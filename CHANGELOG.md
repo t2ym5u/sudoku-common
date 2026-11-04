@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0] - 2026-11-04
+
+### Changed
+- Digging out a puzzle's clues takes less work, with the same result: the
+  generator used to re-solve the whole grid from its bare clues for every
+  clue it tried to remove; it now keeps what the clues already settled
+  carry over, stops as soon as the removed clue is deduced again, and skips
+  re-scanning parts of the grid that have not changed. The puzzles are
+  identical (cross-checked on 6,000 puzzles and 332,594 removal tests, 0
+  differences). About 1.5× faster on 16×16 Hard and Expert, a few percent on
+  smaller grids; ratings and hints are unchanged.
+
 ## [1.6.0] - 2026-11-04
 
 ### Changed

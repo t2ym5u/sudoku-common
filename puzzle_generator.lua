@@ -517,17 +517,36 @@ local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extr
         cells[i], cells[j] = cells[j], cells[i]
     end
 
+    -- Each cell is asked once, in this order, "is the puzzle without it still
+    -- solvable within tier_cap?" -- the same question as
+    -- logic_solver.solvableWithin(puzzle minus that clue), answered
+    -- incrementally (see "Incremental digging support" in logic_solver.lua):
+    --   kept  -- a running state holding the clues already decided to stay
+    --            and what the singles deduce from them. Those clues are in
+    --            every puzzle asked about from then on, so whatever follows
+    --            from them can be taken as known instead of re-derived.
+    --   a test starts from kept, adds the clues not asked about yet, and
+    --            stops as soon as the removed clue is deduced back: the
+    --            puzzle with it is solvable (it always is -- it is the
+    --            solved grid, or a puzzle that already passed), so from
+    --            there deduction completes the grid.
+    -- Same answers, same puzzles, a fraction of the work on big grids.
+    local ctx, kept = logic_solver.digState(n, box_rows, box_cols, extra_regions)
     local removed = 0
     for _, cell in ipairs(cells) do
         if removed >= removals then break end
         local row, col = cell.r, cell.c
         if puzzle[row][col] ~= 0 then
+            local idx    = (row - 1) * n + col
             local backup = puzzle[row][col]
             puzzle[row][col] = 0
-            if logic_solver.solvableWithin(puzzle, n, box_rows, box_cols, extra_regions, tier_cap) then
+            local st = logic_solver.stateWithClues(ctx, kept, puzzle)
+            if logic_solver.deduce(ctx, st, tier_cap, idx) then
                 removed = removed + 1
             else
                 puzzle[row][col] = backup
+                logic_solver.placeClue(ctx, kept, idx, backup)
+                logic_solver.deduceSingles(ctx, kept)
             end
         end
         if on_progress then on_progress(removed, removals) end
