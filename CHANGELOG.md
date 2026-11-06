@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.9.0] - 2026-11-06
+
+### Changed
+- Medium, Hard and Expert are now different puzzles, not just fewer clues:
+  on 9×9 and larger grids each has a floor on what it asks past the singles
+  (Medium: at least one locked candidate or naked pair; Hard: three such
+  steps or a hidden pair/triple/quad; Expert: five, or an X-Wing, Swordfish
+  or XY-Wing). Before, 100% of 9×9 Medium, 90% of Hard and 73% of Expert
+  grids needed nothing but singles, as did every Sudoku X and Windoku grid
+  below Expert. The generator digs on past the level's clue count until the
+  floor holds, then puts clues back while it still does; when it cannot get
+  there it re-digs the hardest grid so far, a fixed number of times (never
+  a time limit: a seed still gives the same puzzle on every device), and
+  keeps the hardest grid seen. The floor holds on 99% of 9×9 Medium, 96% of
+  Hard and 88% of Expert grids (500 seeds); Sudoku X, Windoku and 12×12
+  meet it on every grid measured. Easy, 4×4 and 6×6 grids, and every grid
+  that already met its floor, are unchanged. Generation takes longer on
+  the levels that now retry: worst 9×9 grid ~40 ms on a desktop (about 1 s
+  on a Kobo Aura), up to ~95 ms for Sudoku X Expert and ~115 ms for 12×12
+  Expert.
+- Digging tests above the singles first look for a second solution with a
+  small, counted search (`logic_solver.otherSolution`) before running the
+  subsets and fish: same answers, same puzzles, less work near the end of a
+  dig.
+
+### Added
+- `createPuzzle`'s info table also reports `steps` (deductions needed past
+  the singles), `floor_met` and `attempts`.
+- `test_difficulty_floor_spec.lua`.
+
 ## [1.8.0] - 2026-11-04
 
 ### Fixed

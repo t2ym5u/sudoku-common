@@ -1482,4 +1482,146 @@ function M.deduceSingles(ctx, st)
     return not st.broken
 end
 
+-- Is there a solution of st with something other than `digit` in cell idx?
+-- st is not changed. True: yes, so the grid st came from is ambiguous; false:
+-- no; nil: undecided within `budget` search nodes (a count, never a time, so
+-- the answer -- and the generator's puzzles -- are the same on every device).
+--
+-- Every elimination the techniques make holds for every solution (none of
+-- them assumes the solution is unique), so searching from a state they have
+-- already reduced is sound, and much smaller. The generator calls this on a
+-- grid whose own solution has `digit` there: any second solution of the grid
+-- without that clue must differ from it in that very cell (otherwise it would
+-- also solve the grid with the clue, which has only one), so this is exactly
+-- "does removing the clue leave more than one solution?".
+--
+-- Plain depth-first search: the open cell with the fewest candidates first,
+-- each placement striking its digit from the peers. Module-level functions
+-- rather than closures, which LuaJIT does not compile.
+local os_nodes, os_budget = 0, 0
+
+local function osAssign(peers, value, cand, i, d)
+    local m = lshift(1, d - 1)
+    local keep = bnot(m)
+    value[i] = d
+    cand[i]  = 0
+    local ps = peers[i]
+    for k = 1, #ps do
+        local p = ps[k]
+        if value[p] == d then return false end
+        local cur = cand[p]
+        if band(cur, m) ~= 0 then
+            cur = band(cur, keep)
+            cand[p] = cur
+            if cur == 0 and value[p] == 0 then return false end
+        end
+    end
+    return true
+end
+
+local function osCopy(t, cells)
+    local o = {}
+    for i = 1, cells do o[i] = t[i] end
+    return o
+end
+
+-- Places every naked and hidden single, in place, until none is left. False
+-- on a contradiction.
+local function osPropagate(ctx, value, cand)
+    local cells, units, peers = ctx.cells, ctx.units, ctx.peers
+    local changed = true
+    while changed do
+        changed = false
+        for i = 1, cells do
+            if value[i] == 0 then
+                local cm = cand[i]
+                if cm == 0 then return false end
+                if band(cm, cm - 1) == 0 then
+                    if not osAssign(peers, value, cand, i, LOW_DIGIT[cm]) then return false end
+                    changed = true
+                end
+            end
+        end
+        for u = 1, #units do
+            local us = units[u]
+            local placed, once, twice = 0, 0, 0
+            for k = 1, #us do
+                local i = us[k]
+                local v = value[i]
+                if v ~= 0 then
+                    placed = bor(placed, lshift(1, v - 1))
+                else
+                    local cm = cand[i]
+                    twice = bor(twice, band(once, cm))
+                    once  = bor(once, cm)
+                end
+            end
+            if bor(placed, once) ~= ctx.full_mask then return false end
+            local single = band(once, bnot(twice))
+            while single ~= 0 do
+                local m = band(single, -single)
+                single = band(single, single - 1)
+                for k = 1, #us do
+                    local i = us[k]
+                    if value[i] == 0 and band(cand[i], m) ~= 0 then
+                        if not osAssign(peers, value, cand, i, LOW_DIGIT[m]) then return false end
+                        changed = true
+                        break
+                    end
+                end
+            end
+        end
+    end
+    return true
+end
+
+-- true: a solution; false: none; nil: out of budget.
+local function osSearch(ctx, value, cand)
+    os_nodes = os_nodes + 1
+    if os_nodes > os_budget then return nil end
+    if not osPropagate(ctx, value, cand) then return false end
+    local cells = ctx.cells
+    local best, best_cnt = 0, 99
+    for i = 1, cells do
+        if value[i] == 0 then
+            local cm = cand[i]
+            local cnt = POP8[band(cm, 0xFF)] + POP8[rshift(cm, 8)]
+            if cnt < best_cnt then
+                best, best_cnt = i, cnt
+                if cnt <= 2 then break end
+            end
+        end
+    end
+    if best == 0 then return true end
+    local cm = cand[best]
+    while cm ~= 0 do
+        local m = band(cm, -cm)
+        cm = band(cm, cm - 1)
+        local v2, c2 = osCopy(value, cells), osCopy(cand, cells)
+        if osAssign(ctx.peers, v2, c2, best, LOW_DIGIT[m]) then
+            local found = osSearch(ctx, v2, c2)
+            if found ~= false then return found end
+        end
+    end
+    return false
+end
+
+function M.otherSolution(ctx, st, idx, digit, budget)
+    os_nodes, os_budget = 0, budget
+    local others = band(st.cand[idx], bnot(lshift(1, digit - 1)))
+    local undecided = false
+    while others ~= 0 do
+        local m = band(others, -others)
+        others = band(others, others - 1)
+        local value, cand = osCopy(st.value, ctx.cells), osCopy(st.cand, ctx.cells)
+        if osAssign(ctx.peers, value, cand, idx, LOW_DIGIT[m]) then
+            local found = osSearch(ctx, value, cand)
+            if found then return true end
+            if found == nil then undecided = true end
+        end
+    end
+    if undecided then return nil end
+    return false
+end
+
 return M

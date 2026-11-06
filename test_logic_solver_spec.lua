@@ -458,6 +458,17 @@ describe("speed-ups keep the puzzles", function()
         end
         return acc
     end
+    -- 1.9.0 added difficulty floors, which change Medium and up on purpose
+    -- (test_difficulty_floor_spec.lua): the dig underneath must not change,
+    -- so these checksums are taken with the floors off.
+    local function withoutFloors(fn)
+        local saved = {}
+        for k, v in pairs(PG.FLOORS) do saved[k] = v end
+        for k in pairs(saved) do PG.FLOORS[k] = nil end
+        local ok, err = pcall(fn)
+        for k, v in pairs(saved) do PG.FLOORS[k] = v end
+        assert.is_true(ok, err)
+    end
 
     local SEEDED = {
         { 9, 3, 3, "easy",    352894876 },
@@ -471,12 +482,14 @@ describe("speed-ups keep the puzzles", function()
         local n, br, bc, diff, want = cf[1], cf[2], cf[3], cf[4], cf[5]
         it(("%dx%d %s: same grids and puzzles as 1.5.0 for the same seeds"):format(n, n, diff), function()
             local acc = 0
-            for seed = 1, 5 do
-                local randInt = parkMiller(seed * 1000 + 7)
-                local sol = PG.generateSolvedBoard(n, br, bc, nil, randInt)
-                local puz = PG.createPuzzle(sol, diff, n, br, bc, nil, randInt)
-                acc = checksum(puz, n, checksum(sol, n, acc))
-            end
+            withoutFloors(function()
+                for seed = 1, 5 do
+                    local randInt = parkMiller(seed * 1000 + 7)
+                    local sol = PG.generateSolvedBoard(n, br, bc, nil, randInt)
+                    local puz = PG.createPuzzle(sol, diff, n, br, bc, nil, randInt)
+                    acc = checksum(puz, n, checksum(sol, n, acc))
+                end
+            end)
             assert.are.equal(want, acc)
         end)
     end
@@ -499,10 +512,12 @@ describe("speed-ups keep the puzzles", function()
     for _, cf in ipairs({ { "easy", 23139837 }, { "expert", 796808709 } }) do
         it("windoku " .. cf[1] .. ": same puzzles as 1.5.0 from the same grid", function()
             local acc = 0
-            for seed = 1, 5 do
-                local puz = PG.createPuzzle(WINDOKU_GRID, cf[1], 9, 3, 3, WINDOWS, parkMiller(seed))
-                acc = checksum(puz, 9, acc)
-            end
+            withoutFloors(function()
+                for seed = 1, 5 do
+                    local puz = PG.createPuzzle(WINDOKU_GRID, cf[1], 9, 3, 3, WINDOWS, parkMiller(seed))
+                    acc = checksum(puz, 9, acc)
+                end
+            end)
             assert.are.equal(cf[2], acc)
         end)
     end
@@ -594,42 +609,62 @@ describe("speed-ups keep the puzzles", function()
             local n, br, bc, regions, label = case[1], case[2], case[3], case[4], case[5]
             for _, diff in ipairs({ "easy", "medium", "hard", "expert" }) do
                 it("digs the same " .. label .. " " .. diff .. " puzzles as one full solve per clue", function()
-                    for seed = 1, (n == 12) and 1 or 3 do
-                        local solution = PG.generateSolvedBoard(n, br, bc, regions, seededRandInt(seed))
-                        local got  = PG.createPuzzle(solution, diff, n, br, bc, regions, seededRandInt(seed * 7 + 1))
-                        local want = referenceDig(solution, diff, n, br, bc, regions, seededRandInt(seed * 7 + 1))
-                        assert.are.same(want, got)
-                    end
+                    -- The dig itself, without the difficulty floor (which
+                    -- has specs of its own below).
+                    local floor = PG.FLOORS[diff]
+                    PG.FLOORS[diff] = nil
+                    local ok, err = pcall(function()
+                        for seed = 1, (n == 12) and 1 or 3 do
+                            local solution = PG.generateSolvedBoard(n, br, bc, regions, seededRandInt(seed))
+                            local got  = PG.createPuzzle(solution, diff, n, br, bc, regions, seededRandInt(seed * 7 + 1))
+                            local want = referenceDig(solution, diff, n, br, bc, regions, seededRandInt(seed * 7 + 1))
+                            assert.are.same(want, got)
+                        end
+                    end)
+                    PG.FLOORS[diff] = floor
+                    assert.is_true(ok, err)
                 end)
             end
         end
 
         it("gives solvableWithin()'s answer on every single dig test", function()
-            local deduce, withClues = LS.deduce, LS.stateWithClues
-            local live, tests, mismatches = nil, 0, 0
+            -- Since 1.9.0 a test above the singles is answered in up to
+            -- three calls (singles, then otherSolution, then the level's
+            -- tier): each one that settles the test must agree with a full
+            -- solve of the grid without the clue at the level's tier.
+            local deduce, withClues, other = LS.deduce, LS.stateWithClues, LS.otherSolution
+            local live, cap, tests, mismatches = nil, nil, 0, 0
+            local function check(answer)
+                tests = tests + 1
+                if answer ~= LS.solvableWithin(live, 9, 3, 3, nil, cap) then
+                    mismatches = mismatches + 1
+                end
+            end
             LS.stateWithClues = function(ctx, base, grid)
                 live = grid
                 return withClues(ctx, base, grid)
             end
             LS.deduce = function(ctx, st, tier, stop)
                 local ok = deduce(ctx, st, tier, stop)
-                if stop then
-                    tests = tests + 1
-                    if ok ~= LS.solvableWithin(live, ctx.n, ctx.box_rows, ctx.box_cols, nil, tier) then
-                        mismatches = mismatches + 1
-                    end
-                end
+                -- A singles-only call that fails leaves the test open.
+                if stop and (ok or tier == cap) then check(ok) end
                 return ok
+            end
+            LS.otherSolution = function(...)
+                local found = other(...)
+                if found then check(false) end
+                return found
             end
             local ok, err = pcall(function()
                 for seed = 1, 4 do
                     for _, diff in ipairs({ "medium", "expert" }) do
+                        cap = LS.DIFFICULTY_TIER[diff]
                         local solution = PG.generateSolvedBoard(9, 3, 3, nil, seededRandInt(seed + 50))
                         PG.createPuzzle(solution, diff, 9, 3, 3, nil, seededRandInt(seed + 90))
                     end
                 end
             end)
-            LS.deduce, LS.stateWithClues = deduce, withClues
+            LS.deduce, LS.stateWithClues, LS.otherSolution = deduce, withClues, other
             assert.is_true(ok, err)
             assert.is_true(tests > 100)
             assert.are.equal(0, mismatches)

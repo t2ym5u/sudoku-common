@@ -36,10 +36,27 @@ forced, so a deducible grid is necessarily unique), so it *replaces* the old
 `countSolutions(...) == 1` check instead of adding to it — which also made
 large grids much cheaper to generate.
 
+That is a ceiling. On 9×9 and larger grids each level above Easy also has a
+**floor** (since 1.9.0), so the levels differ by what they ask of the player,
+not only by their clue count:
+
+| Difficulty | Needs at least |
+|---|---|
+| `medium` | 1 step past the singles |
+| `hard`   | 3 such steps, or one hidden pair / triple / quad |
+| `expert` | 5 such steps, or one X-Wing / Swordfish / XY-Wing |
+
+The generator digs on past the level's clue ratio until the floor holds, then
+puts clues back up to the ratio while it still does; if the grid runs out of
+clues to remove first, it puts some back into the hardest grid so far and
+digs it again (a fixed number of attempts, never a time limit, so a seed
+still gives the same puzzle everywhere), and keeps the hardest grid seen.
+Easy, 4×4 and 6×6 grids are unchanged.
+
 `createPuzzle` returns the puzzle plus an info table (`tier_cap`, `max_tier`,
-`counts`, `clues`). `max_tier` is the hardest technique the finished grid
-really needs, and can be lower than `tier_cap` — a 4×4 grid has no room for an
-X-Wing however hard you dig.
+`counts`, `steps`, `floor_met`, `attempts`, `clues`). `max_tier` is the
+hardest technique the finished grid really needs, and can be lower than
+`tier_cap` — a 4×4 grid has no room for an X-Wing however hard you dig.
 
 `sudokukiller` does not go through `createPuzzle` — it has its own cage-based
 generator — but `logic_solver` now reads cage sums (`opts.cages`), so its Easy

@@ -480,42 +480,105 @@ end
 -- expert has no ratio cap: the tier ceiling is the only thing stopping it, so
 -- it digs as deep as pure logic allows.
 -- ---------------------------------------------------------------------------
+--
+-- Both are ceilings, though, and a ceiling alone did not separate the levels:
+-- see "Difficulty floors" below.
+-- ---------------------------------------------------------------------------
 
 local DIG_RATIOS = { easy = 0.43, medium = 0.56, hard = 0.65, expert = nil }
 
--- on_progress (optional): called after each cell examined as
--- on_progress(removed, removals), so callers can drive a real progress bar
--- off actual digging work instead of a fake timer.
+-- ---------------------------------------------------------------------------
+-- Difficulty floors
 --
--- Returns the puzzle plus an info table describing what was actually produced:
---   { tier_cap  = the tier the dig was allowed to use,
---     max_tier  = the hardest tier the finished grid really needs,
---     counts    = { [technique name] = times needed },
---     clues     = number of givens left }
--- max_tier can legitimately come out below tier_cap -- a 4x4 grid has no room
--- for an X-Wing no matter how hard you dig -- so report it rather than pretend
--- the label was achieved.
-local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extra_regions, randInt, on_progress)
-    randInt = randInt or math.random
-    local puzzle   = copyGrid(solved_grid, n)
-    local total    = n * n
-    local tier_cap = logic_solver.DIFFICULTY_TIER[difficulty]
-                     or logic_solver.DIFFICULTY_TIER.medium
-    local ratio    = DIG_RATIOS[difficulty]
-    -- Unknown difficulty strings fell back to "medium" before; keep that.
-    if ratio == nil and logic_solver.DIFFICULTY_TIER[difficulty] == nil then
-        ratio = DIG_RATIOS.medium
-    end
-    local removals = ratio and math.floor(total * ratio) or total
+-- Digging a 9x9 grid at random down to medium's 36 or hard's 29 clues almost
+-- always leaves a grid the singles finish on their own: measured 2026-11-05,
+-- Medium 100%, Hard 94% and even Expert 68% singles-only, so Medium, Hard and
+-- Expert only differed by clue count. Random minimal puzzles are mostly easy;
+-- the tier cap could never make them harder.
+--
+-- A floor is the missing lower bound: the finished grid must need at least
+-- `steps` deductions beyond the singles (locked candidates or harder), or
+-- one technique of tier `or_tier` or above. createPuzzle gets there by:
+--
+--   1. digging to the ratio, exactly as before -- when the floor already
+--      holds there, that is the puzzle, unchanged;
+--   2. otherwise digging on through the cells not asked yet, still within
+--      tier_cap, until the floor holds;
+--   3. if it does, putting clues back (earliest removed first) while it still
+--      holds, up to the ratio's clue count, so the levels keep their clue
+--      gradient too;
+--   4. if the cells run out first, putting a few clues back into the
+--      hardest grid seen so far and digging it again in a new order, at
+--      most `attempts` digs in all, and keeping the hardest grid seen. The
+--      solution never changes, only which clues are left.
+--      Attempts are counted, never timed: a given randInt still gives the
+--      same puzzle on every device (the Daily Challenge relies on it).
+--
+-- Medium needs one step past the singles (a locked candidate or a naked
+-- pair, the first thing tier LOCKED adds); Hard three such steps or one of
+-- tier SUBSETS; Expert five, or one of tier FISH. Measured 2026-11-06 over
+-- 500 9x9 seeds, the floor holds on 99% of Medium, 96% of Hard and 88% of
+-- Expert grids; a miss returns the hardest of its digs, which nearly always
+-- needs a step or more past the singles too (all but 1-2% of them).
+--
+-- Grids below FLOOR_MIN_N get no floor: a 4x4 or 6x6 grid has no room for
+-- anything past the singles, whatever is dug.
+-- ---------------------------------------------------------------------------
 
-    local cells = {}
-    for r = 1, n do
-        for c = 1, n do cells[#cells + 1] = { r = r, c = c } end
+local SINGLES_TIER = logic_solver.TIER.SINGLES
+local SUBSETS      = logic_solver.TIER.SUBSETS
+local FISH         = logic_solver.TIER.FISH
+local FLOOR_MIN_N  = 9
+local FLOORS = {
+    medium = { steps = 1,                   attempts = 14 },
+    hard   = { steps = 3, or_tier = SUBSETS, attempts = 14 },
+    expert = { steps = 5, or_tier = FISH,    attempts = 10 },
+}
+-- Share of the cells a retry puts back into the best grid so far before
+-- digging it again: a few when that grid already needs something past the
+-- singles (a nearby grid is often a little harder), many when the singles
+-- finish it (start well away from it). Measured on 9x9, 2026-11-06 (200-500
+-- seeds): 8 and 24 clues met the floors at least as often as 2-5, 12-16 or
+-- digging the solved grid afresh, for less work per retry.
+local RESTORE      = 0.10
+local RESTORE_EASY = 0.30
+
+-- Search budget of one otherSolution() call (nodes, never time): past it
+-- the test falls back to plain deduction, which gives the same answer.
+local OTHER_SOLUTION_NODES = 2000
+local OTHER_SOLUTION_MAX_N = 12
+
+-- Steps the singles do not cover (cage_last_cell is a single for killer
+-- cages; createPuzzle never sees cages, listed for completeness).
+local SINGLES = { naked_single = true, hidden_single = true, cage_last_cell = true }
+
+local function nonSingleSteps(counts)
+    local k = 0
+    for name, c in pairs(counts) do
+        if not SINGLES[name] then k = k + c end
     end
-    for i = #cells, 2, -1 do
+    return k
+end
+
+local function floorHolds(floor, max_tier, steps)
+    return steps >= floor.steps or (floor.or_tier ~= nil and max_tier >= floor.or_tier)
+end
+
+local function shuffle(list, randInt)
+    for i = #list, 2, -1 do
         local j = randInt(i)
-        cells[i], cells[j] = cells[j], cells[i]
+        list[i], list[j] = list[j], list[i]
     end
+    return list
+end
+
+-- One dig of `puzzle` (changed in place), asking the givens listed in
+-- `cells`, in that order, whether they can go. Returns the puzzle, the
+-- number of empty cells, and whether `floor` (nil: none) holds.
+-- report(fraction of `cells` examined) drives the progress bar.
+local function dig(puzzle, solved_grid, cells, n, box_rows, box_cols, extra_regions,
+                   tier_cap, removals, floor, report)
+    local total = n * n
 
     -- Each cell is asked once, in this order, "is the puzzle without it still
     -- solvable within tier_cap?" -- the same question as
@@ -531,34 +594,243 @@ local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extr
     --            solved grid, or a puzzle that already passed), so from
     --            there deduction completes the grid.
     -- Same answers, same puzzles, a fraction of the work on big grids.
-    local ctx, kept = logic_solver.digState(n, box_rows, box_cols, extra_regions)
-    local removed = 0
-    for _, cell in ipairs(cells) do
-        if removed >= removals then break end
-        local row, col = cell.r, cell.c
-        if puzzle[row][col] ~= 0 then
-            local idx    = (row - 1) * n + col
-            local backup = puzzle[row][col]
-            puzzle[row][col] = 0
-            local st = logic_solver.stateWithClues(ctx, kept, puzzle)
-            if logic_solver.deduce(ctx, st, tier_cap, idx) then
-                removed = removed + 1
-            else
-                puzzle[row][col] = backup
-                logic_solver.placeClue(ctx, kept, idx, backup)
-                logic_solver.deduceSingles(ctx, kept)
-            end
+    --
+    -- Above the singles, a test is answered in up to three steps, cheapest
+    -- first (the answer is the same as one deduce() at tier_cap, so are the
+    -- puzzles):
+    --   1. deduce with the singles only: if that brings the clue back, so
+    --      would tier_cap;
+    --   2. otherwise, from where that got stuck, look for a solution with
+    --      another digit in the cell: if there is one, the puzzle without the
+    --      clue is ambiguous and no deduction can bring it back. Near the end
+    --      of an Expert dig nearly every test fails this way, and this
+    --      settles it in a fraction of the time the subsets and fish took to
+    --      give up (see logic_solver.otherSolution);
+    --   3. otherwise carry the deduction on at tier_cap.
+    local function removable(ctx, st, idx, digit)
+        if tier_cap <= SINGLES_TIER or n > OTHER_SOLUTION_MAX_N then
+            return logic_solver.deduce(ctx, st, tier_cap, idx)
         end
-        if on_progress then on_progress(removed, removals) end
+        if logic_solver.deduce(ctx, st, SINGLES_TIER, idx) then return true end
+        if st.broken then return false end
+        if logic_solver.otherSolution(ctx, st, idx, digit, OTHER_SOLUTION_NODES) then
+            return false
+        end
+        return logic_solver.deduce(ctx, st, tier_cap, idx)
     end
 
-    local rating = logic_solver.solve(puzzle, n, box_rows, box_cols, extra_regions,
-                                      { max_tier = tier_cap })
-    return puzzle, {
-        tier_cap = tier_cap,
-        max_tier = rating.max_tier,
-        counts   = rating.counts,
-        clues    = total - removed,
+    local removed = 0
+    for r = 1, n do
+        for c = 1, n do
+            if puzzle[r][c] == 0 then removed = removed + 1 end
+        end
+    end
+    local ctx, kept = logic_solver.digState(n, box_rows, box_cols, extra_regions)
+    local order = {}
+    local function tryRemove(cell)
+        local row, col = cell.r, cell.c
+        local idx    = (row - 1) * n + col
+        local backup = puzzle[row][col]
+        puzzle[row][col] = 0
+        local st = logic_solver.stateWithClues(ctx, kept, puzzle)
+        if removable(ctx, st, idx, backup) then
+            removed = removed + 1
+            order[#order + 1] = cell
+            return true
+        end
+        puzzle[row][col] = backup
+        logic_solver.placeClue(ctx, kept, idx, backup)
+        logic_solver.deduceSingles(ctx, kept)
+        return false
+    end
+
+    local count = #cells
+    local i = 1
+    while i <= count and removed < removals do
+        tryRemove(cells[i])
+        report(i / count)
+        i = i + 1
+    end
+    if not floor then return puzzle, removed, true end
+
+    -- Does the floor hold on the puzzle as it stands? The singles alone
+    -- (cheap) settle most cases: if they finish the grid, it does not.
+    -- Also leaves in `rated` the puzzle's rating when it took one (nil: the
+    -- singles finish it), for createPuzzle to rank a grid that misses.
+    local _, empty = logic_solver.digState(n, box_rows, box_cols, extra_regions)
+    local rated
+    local function holds()
+        rated = nil
+        local st = logic_solver.stateWithClues(ctx, empty, puzzle)
+        logic_solver.deduceSingles(ctx, st)
+        if st.unsolved == 0 then return false end
+        -- Stuck on singles but solvable within tier_cap: at least one step
+        -- beyond them is needed.
+        if floor.steps <= 1 then return true end
+        rated = logic_solver.solve(puzzle, n, box_rows, box_cols, extra_regions,
+                                   { max_tier = tier_cap })
+        return floorHolds(floor, rated.max_tier, nonSingleSteps(rated.counts))
+    end
+
+    -- Past the ratio, a level stops digging as soon as its floor holds;
+    -- Expert (no ratio) always digs to the end.
+    -- A grid that misses comes back with its rating when holds() took one
+    -- on it as it stands (a failed removal puts the clue back), or
+    -- "singles" when the singles finish it.
+    local ok = removed >= removals and holds()
+    local looked = removed >= removals
+    while not ok and i <= count do
+        if tryRemove(cells[i]) and removed >= removals then
+            ok = holds()
+            looked = true
+        end
+        report(i / count)
+        i = i + 1
+    end
+    -- (Expert, or a dig that ran out of cells before the ratio: not looked
+    -- at yet.)
+    if not ok and not looked then ok = holds() end
+    if not ok then return puzzle, removed, false, rated or "singles" end
+
+    -- Back up to the ratio's clue count while the floor still holds: the
+    -- clues this dig took first, then any other empty cell.
+    if ok and removed > removals then
+        local back = {}
+        for k = 1, #order do back[k] = order[k] end
+        local mine = {}
+        for k = 1, #order do mine[(order[k].r - 1) * n + order[k].c] = true end
+        for r = 1, n do
+            for c = 1, n do
+                if puzzle[r][c] == 0 and not mine[(r - 1) * n + c] then
+                    back[#back + 1] = { r = r, c = c }
+                end
+            end
+        end
+        for k = 1, #back do
+            if removed <= removals then break end
+            local cell = back[k]
+            puzzle[cell.r][cell.c] = solved_grid[cell.r][cell.c]
+            if holds() then
+                removed = removed - 1
+            else
+                puzzle[cell.r][cell.c] = 0
+            end
+        end
+    end
+    return puzzle, removed, ok
+end
+
+-- on_progress (optional): called as the digging goes as
+-- on_progress(done, total), done/total being the fraction of the work done
+-- (a retry for the floor takes the bar on from where it was), so callers
+-- can drive a real progress bar instead of a fake timer.
+--
+-- Returns the puzzle plus an info table describing what was actually produced:
+--   { tier_cap  = the tier the dig was allowed to use,
+--     max_tier  = the hardest tier the finished grid really needs,
+--     counts    = { [technique name] = times needed },
+--     steps     = deductions needed beyond the singles,
+--     floor_met = the level's floor holds (true when it has none),
+--     attempts  = digs it took,
+--     clues     = number of givens left }
+-- max_tier can legitimately come out below tier_cap -- a 4x4 grid has no room
+-- for an X-Wing no matter how hard you dig -- so report it rather than pretend
+-- the label was achieved.
+local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extra_regions, randInt, on_progress)
+    randInt = randInt or math.random
+    local total    = n * n
+    local tier_cap = logic_solver.DIFFICULTY_TIER[difficulty]
+                     or logic_solver.DIFFICULTY_TIER.medium
+    local ratio    = DIG_RATIOS[difficulty]
+    local floor    = FLOORS[difficulty]
+    -- Unknown difficulty strings fell back to "medium" before; keep that.
+    if ratio == nil and logic_solver.DIFFICULTY_TIER[difficulty] == nil then
+        ratio = DIG_RATIOS.medium
+        floor = FLOORS.medium
+    end
+    if n < FLOOR_MIN_N then floor = nil end
+    local removals = ratio and math.floor(total * ratio) or total
+    local attempts = floor and floor.attempts or 1
+
+    -- First dig: the whole solved grid in a random order (exactly as before
+    -- the floors, so a grid that meets its floor at the ratio is unchanged).
+    local puzzle = copyGrid(solved_grid, n)
+    local cells = {}
+    for r = 1, n do
+        for c = 1, n do cells[#cells + 1] = { r = r, c = c } end
+    end
+    shuffle(cells, randInt)
+
+    local best, best_removed, best_key, best_rating
+    local met = (floor == nil)
+    local used = 0
+    local base, span = 0, 1
+    for attempt = 1, attempts do
+        used = attempt
+        if attempts > 1 then
+            span = (attempt < attempts) and (1 - base) / 2 or (1 - base)
+        end
+        local b, s = base, span
+        local report = on_progress
+            and function(f) on_progress(b + s * f, 1) end
+            or function() end
+        local p, removed, ok, rating = dig(puzzle, solved_grid, cells, n, box_rows, box_cols,
+                                           extra_regions, tier_cap, removals, floor, report)
+        if ok then
+            best, best_removed, best_rating, met = p, removed, nil, true
+            break
+        end
+        -- Floor missed: keep the hardest grid so far (the latest on a tie)...
+        local key
+        if rating == "singles" then
+            rating, key = nil, SINGLES_TIER * 10000
+        else
+            rating = rating or logic_solver.solve(p, n, box_rows, box_cols, extra_regions,
+                                                  { max_tier = tier_cap })
+            key = rating.max_tier * 10000 + nonSingleSteps(rating.counts)
+        end
+        if not best_key or key >= best_key then
+            best, best_removed, best_key, best_rating = p, removed, key, rating
+        end
+        base = base + span
+        if attempt == attempts then break end
+        -- ...and dig it again: put back some of its clues at random, then
+        -- ask every given again, in a new random order.
+        local share = (best_key < 10000 * (SINGLES_TIER + 1)) and RESTORE_EASY or RESTORE
+        local restore = math.floor(total * share)
+        puzzle = copyGrid(best, n)
+        local holes = {}
+        for r = 1, n do
+            for c = 1, n do
+                if puzzle[r][c] == 0 then holes[#holes + 1] = { r = r, c = c } end
+            end
+        end
+        for k = 1, math.min(restore, #holes) do
+            local j = k - 1 + randInt(#holes - k + 1)
+            holes[k], holes[j] = holes[j], holes[k]
+            local cell = holes[k]
+            puzzle[cell.r][cell.c] = solved_grid[cell.r][cell.c]
+        end
+        cells = {}
+        for r = 1, n do
+            for c = 1, n do
+                if puzzle[r][c] ~= 0 then cells[#cells + 1] = { r = r, c = c } end
+            end
+        end
+        shuffle(cells, randInt)
+    end
+    if on_progress then on_progress(1, 1) end
+
+    local rating = best_rating or logic_solver.solve(best, n, box_rows, box_cols, extra_regions,
+                                                     { max_tier = tier_cap })
+    return best, {
+        tier_cap  = tier_cap,
+        max_tier  = rating.max_tier,
+        counts    = rating.counts,
+        steps     = nonSingleSteps(rating.counts),
+        floor_met = met,
+        attempts  = used,
+        clues     = total - best_removed,
     }
 end
 
@@ -566,4 +838,10 @@ return {
     generateSolvedBoard = generateSolvedBoard,
     countSolutions      = countSolutions,
     createPuzzle        = createPuzzle,
+    -- For specs and audits (specs switch a floor off by setting
+    -- FLOORS[level] to nil, then put it back).
+    DIG_RATIOS          = DIG_RATIOS,
+    FLOORS              = FLOORS,
+    FLOOR_MIN_N         = FLOOR_MIN_N,
+    nonSingleSteps      = nonSingleSteps,
 }
