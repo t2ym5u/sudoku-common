@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.10.0] - 2026-11-09
+
+### Changed
+- 16×16 Hard stops digging at 60% of the cells (about 102 clues left),
+  so 16×16 Expert is the harder level again. Both used to dig the very
+  same grid (about 92 clues), because Hard already reached its 65% limit
+  and Expert's extra techniques could not remove a single clue more.
+  Other sizes and levels are unchanged.
+
 ## [1.9.0] - 2026-11-06
 
 ### Changed

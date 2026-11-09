@@ -7,7 +7,7 @@
 -- test_module_guard_spec.lua checks), and list every new module in `modules`.
 return {
     lib     = "sudoku-common",
-    version = "1.9.0",
+    version = "1.10.0",
     modules = {
         "base_board", "base_board_widget", "base_screen", "logic_solver",
         "puzzle_generator", "stats_exporter", "sudoku_grid_utils",

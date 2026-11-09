@@ -487,6 +487,13 @@ end
 
 local DIG_RATIOS = { easy = 0.43, medium = 0.56, hard = 0.65, expert = nil }
 
+-- 16x16 Hard dug almost as deep as its ratio allows (about 92 clues of 256),
+-- and Expert could not remove a single clue more, even with FISH: both came
+-- out the very same grid (measured 2026-11-09). On 16x16 Hard therefore stops
+-- at 60% (102 clues), so Expert, which digs as far as logic allows, is the
+-- harder one again.
+local DIG_RATIOS_BY_SIZE = { [16] = { hard = 0.60 } }
+
 -- ---------------------------------------------------------------------------
 -- Difficulty floors
 --
@@ -742,6 +749,9 @@ local function createPuzzle(solved_grid, difficulty, n, box_rows, box_cols, extr
     local tier_cap = logic_solver.DIFFICULTY_TIER[difficulty]
                      or logic_solver.DIFFICULTY_TIER.medium
     local ratio    = DIG_RATIOS[difficulty]
+    if DIG_RATIOS_BY_SIZE[n] and DIG_RATIOS_BY_SIZE[n][difficulty] then
+        ratio = DIG_RATIOS_BY_SIZE[n][difficulty]
+    end
     local floor    = FLOORS[difficulty]
     -- Unknown difficulty strings fell back to "medium" before; keep that.
     if ratio == nil and logic_solver.DIFFICULTY_TIER[difficulty] == nil then
