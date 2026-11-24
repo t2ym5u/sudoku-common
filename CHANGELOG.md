@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.11.0] - 2026-11-24
+
+### Added
+- With the Dashboard installed, the title bar's close icon becomes a house:
+  it saves and closes the game, then opens the Dashboard (`goHome()`), as
+  in game-common 1.19.0. Without the Dashboard the close icon stays; the
+  Back key always just closes.
+
 ## [1.10.0] - 2026-11-09
 
 ### Changed

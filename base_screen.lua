@@ -495,8 +495,27 @@ end
 -- TitleBar helpers
 -- ---------------------------------------------------------------------------
 
+-- The Dashboard plugin when it is installed and active, nil otherwise.
+function BaseScreen:dashboard()
+    local ui   = self.plugin and self.plugin.ui
+    local dash = ui and ui.dashboard
+    if type(dash) == "table" and type(dash.show) == "function" then return dash end
+end
+
+-- Close the game (saving it, as closeScreen does) and open the Dashboard
+-- over what was under it. Both in the same callback, so one repaint.
+function BaseScreen:goHome()
+    local dash = self:dashboard()
+    self:closeScreen()
+    if dash then dash:show() end
+end
+
+-- Hamburger menu on the left; on the right a house back to the Dashboard
+-- when it is installed, close otherwise (the Back key always just closes).
+-- Same as game-common/screen_base.lua.
 function BaseScreen:buildTitleBar(title, options_fn)
     local self_ref = self
+    local home = self:dashboard() ~= nil
     return TitleBar:new{
         width                  = DeviceScreen:getWidth(),
         title                  = title,
@@ -514,7 +533,10 @@ function BaseScreen:buildTitleBar(title, options_fn)
             dlg = ButtonDialog:new{ title = title, buttons = buttons }
             UIManager:show(dlg)
         end,
-        close_callback = function() self_ref:closeScreen() end,
+        close_callback = not home and function() self_ref:closeScreen() end or nil,
+        right_icon     = home and "home" or nil,
+        right_icon_tap_callback = home and function() self_ref:goHome() end or nil,
+        right_icon_allow_flash  = false,
         with_bottom_line = true,
     }
 end
