@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.0] - 2026-11-24
+
+### Added
+- `BaseScreen:onFlushSettings()`: KOReader's FlushSettings event (sent before
+  suspend and power-off) writes the game's pending save. The sudoku variants
+  now write their settings file 3 seconds after a move instead of after
+  every one, as game-common 1.20.0 does.
+
 ## [1.11.0] - 2026-11-24
 
 ### Added

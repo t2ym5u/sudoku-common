@@ -471,6 +471,12 @@ function BaseScreen:onClose()
     self:closeScreen()
 end
 
+-- KOReader sends the screen FlushSettings before suspend and power-off:
+-- write the game's pending save. Returns nothing, so the event goes on.
+function BaseScreen:onFlushSettings()
+    if self.plugin and self.plugin.flushSettings then self.plugin:flushSettings() end
+end
+
 function BaseScreen:makeCloseButtonConfig()
     return {
         text     = _("Close"),
